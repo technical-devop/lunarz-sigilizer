@@ -1,17 +1,36 @@
+import {
+  GEOMETRY_EPSILON,
+  geometryToPath,
+  getGlyphGeometry,
+  measureSegmentOverlap,
+  transformGlyphGeometry,
+  transformPoint,
+  type GlyphGeometry,
+  type PolylineSegment,
+  type SegmentRef,
+} from './geometry';
 import { GLYPH_BOX_SIZE, getGlyph, type GlyphLetter } from './glyphs';
 import type { ClassifiedCharacter, IntentionResult } from './intention';
 
 export const SIGIL_WIDTH = 512;
 export const SIGIL_HEIGHT = 512;
 
-const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+export const SPINE_SCALE = 1.22;
+export const MIN_COMPANION_SCALE = 0.55;
+export const MAX_COMPANION_SCALE = 0.7;
+export const MAX_CANDIDATES_PER_LETTER = 24;
+
 const UINT32_RANGE = 0x100000000;
 const HALF_CANVAS = SIGIL_WIDTH / 2;
 const GLYPH_HALF = GLYPH_BOX_SIZE / 2;
-const MARK_MARGIN = 46;
-const MAX_MARK_EXTENT = HALF_CANVAS - MARK_MARGIN;
-const LAYOUT_MODE_COUNT = 3;
-const LAYOUT_MODE_MULTIPLIER = 0x144cbc89;
+const MAX_CENTER_RADIUS = 85;
+const MAX_MARK_EXTENT = 150;
+const VARIANT_STRIDE = 104729;
+const REGENERATION_STRIDE = 7919;
+const SPINE_TARGET_CHANCE = 0.65;
+const MIN_COMPANION_JITTER = 0.01;
+const MIN_CENTER_SEPARATION_RATIO = 0.205;
+const MAX_FALLBACK_CANDIDATES = 512;
 
 export interface LetterTransform {
   readonly x: number;
@@ -21,12 +40,32 @@ export interface LetterTransform {
   readonly mirror: boolean;
 }
 
+export interface ConnectionProvenance {
+  readonly fromSurvivingIndex: number;
+  readonly fromLetter: GlyphLetter;
+  readonly fromSegment: SegmentRef;
+  readonly toSurvivingIndex: number;
+  readonly toLetter: GlyphLetter;
+  readonly toSegment: SegmentRef;
+  readonly overlapLength: number;
+  readonly slide: number;
+  readonly angularError: number;
+  readonly perpendicularError: number;
+}
+
+export interface CompositionSearchStats {
+  readonly maxCandidatesPerLetter: number;
+  readonly candidatesEvaluated: number;
+  readonly acceptedConnections: number;
+}
+
 export interface CompositionLetter {
   readonly letter: GlyphLetter;
   readonly glyphId: GlyphLetter;
   readonly sourceIndex: number;
   readonly survivingIndex: number;
   readonly path: string;
+  readonly renderPath: string;
   readonly transform: LetterTransform;
 }
 
@@ -36,6 +75,9 @@ export interface SigilComposition {
   readonly height: number;
   readonly letters: readonly CompositionLetter[];
   readonly isEmpty: boolean;
+  readonly spineSurvivingIndex: number | null;
+  readonly connections: readonly ConnectionProvenance[];
+  readonly searchStats: CompositionSearchStats;
 }
 
 export interface ComposeOptions {
@@ -48,6 +90,45 @@ interface Placement {
   readonly rotation: number;
   readonly scale: number;
   readonly mirror: boolean;
+}
+
+interface PlacedLetter {
+  readonly survivingIndex: number;
+  readonly letter: GlyphLetter;
+  readonly placement: Placement;
+  readonly geometry: GlyphGeometry;
+}
+
+interface TargetSegment {
+  readonly letterIndex: number;
+  readonly segment: PolylineSegment;
+  usage: number;
+}
+
+interface RawConnection {
+  readonly fromSurvivingIndex: number;
+  readonly toSurvivingIndex: number;
+  readonly fromSegment: SegmentRef;
+  readonly toSegment: SegmentRef;
+  readonly slide: number;
+}
+
+interface CandidateScoreInput {
+  readonly placement: Placement;
+  readonly target: TargetSegment;
+  readonly placed: readonly PlacedLetter[];
+  readonly spineIndex: number;
+  readonly localWorldLength: number;
+  readonly overlapLength: number;
+  readonly crossings: number;
+  readonly currentExtent: number;
+}
+
+interface Candidate {
+  readonly placement: Placement;
+  readonly connection: RawConnection;
+  readonly target: TargetSegment;
+  readonly score: number;
 }
 
 function normalizeSeed(seed: number): number {
@@ -83,192 +164,591 @@ export function createSeededRandom(seed: number): () => number {
   };
 }
 
+export function variantSeeds(letters: readonly string[], regeneration = 0): number[] {
+  const base = seedFromLetters(letters);
+  const regenerate = Number.isFinite(regeneration)
+    ? Math.max(0, Math.trunc(regeneration))
+    : 0;
+  const regenerationOffset = Math.imul(regenerate >>> 0, REGENERATION_STRIDE) >>> 0;
+  const safeRange = UINT32_RANGE - 2 * VARIANT_STRIDE;
+  const offset = (base + regenerationOffset) % safeRange;
+
+  return [0, 1, 2].map((slot) => (offset + slot * VARIANT_STRIDE) >>> 0);
+}
+
 function isKeptCharacter(
   character: ClassifiedCharacter,
 ): character is ClassifiedCharacter & { normalized: string } {
   return character.classification === 'kept' && character.normalized !== null;
 }
 
-function layoutMode(seed: number): 0 | 1 | 2 {
-  const mode = (Math.imul(seed, LAYOUT_MODE_MULTIPLIER) >>> 0) % LAYOUT_MODE_COUNT;
-  return mode === 0 ? 0 : mode === 1 ? 1 : 2;
+function segmentRef(segment: SegmentRef): SegmentRef {
+  return { strokeIndex: segment.strokeIndex, segmentIndex: segment.segmentIndex };
 }
 
-function glyphScale(count: number): number {
-  if (count <= 1) {
-    return 1.5;
+function findSegment(geometry: GlyphGeometry, reference: SegmentRef): PolylineSegment {
+  const segment = geometry.segments.find(
+    (candidate) =>
+      candidate.strokeIndex === reference.strokeIndex &&
+      candidate.segmentIndex === reference.segmentIndex,
+  );
+
+  if (!segment) {
+    throw new Error(
+      `Missing segment ${reference.strokeIndex}:${reference.segmentIndex} in glyph ${geometry.letter}`,
+    );
   }
 
-  return Math.min(1.16, Math.max(0.44, 1.34 / Math.pow(count, 0.3)));
+  return segment;
 }
 
-function ringWeight(ring: number): number {
-  return ring === 0 ? 1 : ring === 1 ? 1.75 : 2.5;
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
-function ringRadius(ring: number): number {
-  return ring === 0 ? 0.8 : ring === 1 ? 1.55 : 2.3;
-}
-
-function allocateRingCounts(total: number, rings: number): number[] {
-  const weights = Array.from({ length: rings }, (_, ring) => ringWeight(ring));
-  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
-  const counts = weights.map(() => 1);
-  const remaining = total - rings;
-
-  if (remaining <= 0) {
-    return counts;
+function pickWeightedIndex(random: () => number, weights: readonly number[]): number {
+  if (weights.length === 0) {
+    return -1;
   }
 
-  const raw = weights.map((weight) => (remaining * weight) / weightTotal);
-  const floors = raw.map(Math.floor);
-  const assigned = floors.reduce((sum, value) => sum + value, 0);
-  const order = raw
-    .map((value, index) => ({ remainder: value - (floors[index] ?? 0), index }))
-    .sort((left, right) => right.remainder - left.remainder || left.index - right.index);
+  let total = 0;
+  for (const weight of weights) {
+    total += Math.max(0, weight);
+  }
 
-  for (let extra = 0; extra < remaining - assigned; extra += 1) {
-    const entry = order[extra % rings];
-    if (entry) {
-      floors[entry.index] = (floors[entry.index] ?? 0) + 1;
+  if (total <= 0) {
+    return Math.min(weights.length - 1, Math.floor(random() * weights.length));
+  }
+
+  let target = random() * total;
+  for (let index = 0; index < weights.length; index += 1) {
+    target -= Math.max(0, weights[index] ?? 0);
+    if (target <= 0) {
+      return index;
     }
   }
 
-  return counts.map((count, index) => count + (floors[index] ?? 0));
+  return weights.length - 1;
 }
 
-function ringPlacements(count: number, random: () => number): Placement[] {
-  const rings = count <= 8 ? 1 : count <= 14 ? 2 : 3;
-  const ringCounts = allocateRingCounts(count, rings);
-  const baseScale = glyphScale(count);
-  const unit = GLYPH_HALF * baseScale;
-  const phase = random() * Math.PI * 2;
-  const lean = (random() - 0.5) * 36;
-  const placements: Placement[] = [];
+function pickTarget(
+  random: () => number,
+  spineSegments: readonly TargetSegment[],
+  allSegments: readonly TargetSegment[],
+): TargetSegment | null {
+  if (allSegments.length === 0) {
+    return null;
+  }
 
-  for (let ring = 0; ring < rings; ring += 1) {
-    const lettersInRing = ringCounts[ring] ?? 0;
-    if (lettersInRing === 0) {
-      continue;
+  const pool =
+    spineSegments.length > 0 && random() < SPINE_TARGET_CHANCE
+      ? spineSegments
+      : allSegments;
+  const index = pickWeightedIndex(
+    random,
+    pool.map((target) => target.segment.length),
+  );
+
+  return index >= 0 ? (pool[index] ?? null) : null;
+}
+
+function companionScale(
+  random: () => number,
+  ordinal: number,
+  companionCount: number,
+): number {
+  const progress = companionCount <= 1 ? 0 : ordinal / (companionCount - 1);
+  const base =
+    MAX_COMPANION_SCALE - (MAX_COMPANION_SCALE - MIN_COMPANION_SCALE) * progress;
+  const jitter = (random() - 0.5) * MIN_COMPANION_JITTER * 2;
+
+  return clamp(base + jitter, MIN_COMPANION_SCALE, MAX_COMPANION_SCALE);
+}
+
+function computeCandidateTransform(
+  local: PolylineSegment,
+  target: PolylineSegment,
+  scale: number,
+  mirror: boolean,
+  flip: boolean,
+  slideFraction: number,
+): Placement {
+  const mirrorSign = mirror ? -1 : 1;
+  const localVectorX = (local.end.x - local.start.x) * mirrorSign;
+  const localVectorY = local.end.y - local.start.y;
+  const targetAngle = Math.atan2(target.tangent.y, target.tangent.x);
+  const localAngle = Math.atan2(localVectorY, localVectorX);
+  const rawRotation = targetAngle - localAngle + (flip ? Math.PI : 0);
+  const rotation = Math.atan2(Math.sin(rawRotation), Math.cos(rawRotation));
+  const midpointX = (local.midpoint.x - GLYPH_HALF) * mirrorSign * scale;
+  const midpointY = (local.midpoint.y - GLYPH_HALF) * scale;
+  const cosine = Math.cos(rotation);
+  const sine = Math.sin(rotation);
+  const rotatedX = cosine * midpointX - sine * midpointY;
+  const rotatedY = sine * midpointX + cosine * midpointY;
+  const slide = clamp(slideFraction, 0, 1);
+
+  return {
+    x: target.start.x + target.tangent.x * slide * target.length - rotatedX,
+    y: target.start.y + target.tangent.y * slide * target.length - rotatedY,
+    rotation: (rotation * 180) / Math.PI,
+    scale,
+    mirror,
+  };
+}
+
+function glyphReach(placement: Placement): number {
+  const radians = (placement.rotation * Math.PI) / 180;
+  return (
+    GLYPH_HALF *
+    placement.scale *
+    (Math.abs(Math.cos(radians)) + Math.abs(Math.sin(radians)))
+  );
+}
+
+function markExtent(placed: readonly PlacedLetter[]): number {
+  let extent = 0;
+
+  for (const letter of placed) {
+    extent = Math.max(
+      extent,
+      Math.hypot(letter.placement.x, letter.placement.y) + glyphReach(letter.placement),
+    );
+  }
+
+  return extent;
+}
+
+function nearestCenterDistance(placement: Placement, placed: readonly PlacedLetter[]): number {
+  let nearest = Number.POSITIVE_INFINITY;
+
+  for (const letter of placed) {
+    nearest = Math.min(
+      nearest,
+      Math.hypot(
+        placement.x - letter.placement.x,
+        placement.y - letter.placement.y,
+      ),
+    );
+  }
+
+  return nearest;
+}
+
+function minimumCenterSeparation(
+  placement: Placement,
+  placed: readonly PlacedLetter[],
+): number {
+  let scaleTotal = placement.scale;
+
+  for (const letter of placed) {
+    scaleTotal += letter.placement.scale;
+  }
+
+  return (
+    MIN_CENTER_SEPARATION_RATIO *
+    GLYPH_BOX_SIZE *
+    (scaleTotal / (placed.length + 1))
+  );
+}
+
+function orientation(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function boxesOverlap(left: PolylineSegment, right: PolylineSegment): boolean {
+  const leftMinX = Math.min(left.start.x, left.end.x);
+  const leftMaxX = Math.max(left.start.x, left.end.x);
+  const leftMinY = Math.min(left.start.y, left.end.y);
+  const leftMaxY = Math.max(left.start.y, left.end.y);
+  const rightMinX = Math.min(right.start.x, right.end.x);
+  const rightMaxX = Math.max(right.start.x, right.end.x);
+  const rightMinY = Math.min(right.start.y, right.end.y);
+  const rightMaxY = Math.max(right.start.y, right.end.y);
+
+  return (
+    leftMinX <= rightMaxX &&
+    leftMaxX >= rightMinX &&
+    leftMinY <= rightMaxY &&
+    leftMaxY >= rightMinY
+  );
+}
+
+function segmentsCross(left: PolylineSegment, right: PolylineSegment): boolean {
+  if (!boxesOverlap(left, right)) {
+    return false;
+  }
+
+  const first = orientation(left.start, left.end, right.start);
+  const second = orientation(left.start, left.end, right.end);
+  const third = orientation(right.start, right.end, left.start);
+  const fourth = orientation(right.start, right.end, left.end);
+
+  if (first === 0 || second === 0 || third === 0 || fourth === 0) {
+    return false;
+  }
+
+  return first > 0 !== second > 0 && third > 0 !== fourth > 0;
+}
+
+function countCrossings(
+  candidate: GlyphGeometry,
+  local: PolylineSegment,
+  target: TargetSegment,
+  placed: readonly PlacedLetter[],
+): number {
+  let crossings = 0;
+
+  for (const candidateSegment of candidate.segments) {
+    for (const placedLetter of placed) {
+      for (const existingSegment of placedLetter.geometry.segments) {
+        const isConnection =
+          candidateSegment.strokeIndex === local.strokeIndex &&
+          candidateSegment.segmentIndex === local.segmentIndex &&
+          placedLetter.survivingIndex === target.letterIndex &&
+          existingSegment.strokeIndex === target.segment.strokeIndex &&
+          existingSegment.segmentIndex === target.segment.segmentIndex;
+
+        if (isConnection) {
+          continue;
+        }
+
+        if (segmentsCross(candidateSegment, existingSegment)) {
+          crossings += 1;
+        }
+      }
+    }
+  }
+
+  return crossings;
+}
+
+function scoreCandidate(input: CandidateScoreInput): number {
+  const {
+    placement,
+    target,
+    placed,
+    spineIndex,
+    localWorldLength,
+    overlapLength,
+    crossings,
+    currentExtent,
+  } = input;
+  const overlapRatio =
+    overlapLength /
+    Math.max(GEOMETRY_EPSILON, Math.min(localWorldLength, target.segment.length));
+  let score = target.letterIndex === spineIndex ? 3 : 0;
+  score += overlapRatio * 2;
+  score -= crossings * 0.4;
+
+  let nearest = Number.POSITIVE_INFINITY;
+  let scaleTotal = placement.scale;
+
+  for (const letter of placed) {
+    nearest = Math.min(
+      nearest,
+      Math.hypot(
+        placement.x - letter.placement.x,
+        placement.y - letter.placement.y,
+      ),
+    );
+    scaleTotal += letter.placement.scale;
+  }
+
+  const averageScale = scaleTotal / (placed.length + 1);
+  const minimumSeparation = 0.2 * GLYPH_BOX_SIZE * averageScale;
+
+  if (nearest < minimumSeparation) {
+    score -= ((minimumSeparation - nearest) / minimumSeparation) * 1.5;
+  }
+
+  const reach = glyphReach(placement);
+  const newExtent = Math.max(
+    currentExtent,
+    Math.hypot(placement.x, placement.y) + reach,
+  );
+  const growth =
+    currentExtent > 0 ? Math.max(0, (newExtent - currentExtent) / currentExtent) : 0;
+  score -= growth * 1.2;
+  score -= target.usage * 0.25;
+  score -= (Math.hypot(placement.x, placement.y) / 150) * 0.35;
+
+  return score;
+}
+
+function findFallbackCandidate(
+  geometry: GlyphGeometry,
+  targets: readonly TargetSegment[],
+  placed: readonly PlacedLetter[],
+  scale: number,
+  spineIndex: number,
+  currentExtent: number,
+  survivingIndex: number,
+): Candidate | null {
+  const slides = [0.5, 0.2, 0.8, 0.35, 0.65];
+  let tested = 0;
+  let best: Candidate | null = null;
+
+  search: for (const target of targets) {
+    for (const local of geometry.segments) {
+      for (const mirror of [false, true]) {
+        for (const flip of [false, true]) {
+          for (const slide of slides) {
+            if (tested >= MAX_FALLBACK_CANDIDATES) {
+              break search;
+            }
+            tested += 1;
+            const placement = computeCandidateTransform(
+              local,
+              target.segment,
+              scale,
+              mirror,
+              flip,
+              slide,
+            );
+
+            if (
+              nearestCenterDistance(placement, placed) <
+              minimumCenterSeparation(placement, placed)
+            ) {
+              continue;
+            }
+
+            const overlap = verifiedOverlap(placement, local, target.segment);
+
+            if (!overlap.overlaps) {
+              continue;
+            }
+
+            const candidateGeometry = transformGlyphGeometry(geometry, placement);
+            const crossings = countCrossings(candidateGeometry, local, target, placed);
+            const score = scoreCandidate({
+              placement,
+              target,
+              placed,
+              spineIndex,
+              localWorldLength: local.length * scale,
+              overlapLength: overlap.length,
+              crossings,
+              currentExtent,
+            });
+
+            if (best === null || score > best.score) {
+              best = {
+                placement,
+                target,
+                score,
+                connection: {
+                  fromSurvivingIndex: survivingIndex,
+                  toSurvivingIndex: target.letterIndex,
+                  fromSegment: segmentRef(local),
+                  toSegment: segmentRef(target.segment),
+                  slide,
+                },
+              };
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return best;
+}
+
+function verifiedOverlap(
+  placement: Placement,
+  local: PolylineSegment,
+  target: PolylineSegment,
+): ReturnType<typeof measureSegmentOverlap> {
+  return measureSegmentOverlap(
+    {
+      start: transformPoint(placement, local.start),
+      end: transformPoint(placement, local.end),
+    },
+    target,
+    GEOMETRY_EPSILON,
+  );
+}
+
+function layoutLetters(
+  letters: readonly GlyphLetter[],
+  seed: number,
+): {
+  readonly placements: readonly Placement[];
+  readonly spineIndex: number;
+  readonly connections: readonly RawConnection[];
+  readonly candidatesEvaluated: number;
+} {
+  const count = letters.length;
+  const random = createSeededRandom(seed);
+  const spineIndex = seed % count;
+  const placements: Placement[] = new Array<Placement>(count);
+  const placed: PlacedLetter[] = [];
+  const targets: TargetSegment[] = [];
+  const connections: RawConnection[] = [];
+
+  const addPlaced = (
+    survivingIndex: number,
+    placement: Placement,
+    geometry: GlyphGeometry,
+  ): void => {
+    placements[survivingIndex] = placement;
+    placed.push({
+      survivingIndex,
+      letter: letters[survivingIndex]!,
+      placement,
+      geometry,
+    });
+
+    for (const segment of geometry.segments) {
+      targets.push({ letterIndex: survivingIndex, segment, usage: 0 });
+    }
+  };
+
+  const spineGeometry = getGlyphGeometry(letters[spineIndex]!);
+  if (!spineGeometry) {
+    throw new Error(`No geometry is defined for spine letter "${letters[spineIndex]}"`);
+  }
+
+  const spinePlacement: Placement = {
+    x: 0,
+    y: 0,
+    rotation: random() * 360 - 180,
+    scale: SPINE_SCALE,
+    mirror: random() < 0.5,
+  };
+  addPlaced(
+    spineIndex,
+    spinePlacement,
+    transformGlyphGeometry(spineGeometry, spinePlacement),
+  );
+
+  const companions = Array.from({ length: count }, (_, index) => index).filter(
+    (index) => index !== spineIndex,
+  );
+  let candidatesEvaluated = 0;
+
+  for (let ordinal = 0; ordinal < companions.length; ordinal += 1) {
+    const survivingIndex = companions[ordinal]!;
+    const letter = letters[survivingIndex]!;
+    const geometry = getGlyphGeometry(letter);
+
+    if (!geometry) {
+      throw new Error(`No geometry is defined for letter "${letter}"`);
     }
 
-    const direction = ring % 2 === 0 ? 1 : -1;
-    const ringPhase = phase + ring * 0.9 + (random() - 0.5) * 0.3;
-    const radius = unit * ringRadius(ring);
+    const scale = companionScale(random, ordinal, companions.length);
+    const spineTargets = targets.filter((target) => target.letterIndex === spineIndex);
+    const currentExtent = markExtent(placed);
+    let best: Candidate | null = null;
 
-    for (let slot = 0; slot < lettersInRing; slot += 1) {
-      const angle =
-        ringPhase +
-        direction * slot * ((Math.PI * 2) / lettersInRing) +
-        (random() - 0.5) * 0.08;
-      const distance = radius * (0.96 + random() * 0.08);
-      const scale = baseScale * (0.95 + random() * 0.09);
+    for (let candidateIndex = 0; candidateIndex < MAX_CANDIDATES_PER_LETTER; candidateIndex += 1) {
+      candidatesEvaluated += 1;
+      const localIndex = pickWeightedIndex(
+        random,
+        geometry.segments.map((segment) => segment.length),
+      );
+      const local = geometry.segments[localIndex];
 
-      placements.push({
-        x: Math.cos(angle) * distance,
-        y: Math.sin(angle) * distance,
-        rotation: (angle * 180) / Math.PI + direction * 90 + lean + (random() - 0.5) * 16,
+      if (!local) {
+        continue;
+      }
+
+      const target = pickTarget(random, spineTargets, targets);
+
+      if (!target) {
+        continue;
+      }
+
+      const mirror = random() < 0.5;
+      const flip = random() < 0.5;
+      const slide = 0.1 + random() * 0.8;
+      const placement = computeCandidateTransform(
+        local,
+        target.segment,
         scale,
-        mirror: random() < 0.5,
+        mirror,
+        flip,
+        slide,
+      );
+
+      if (
+        nearestCenterDistance(placement, placed) <
+        minimumCenterSeparation(placement, placed)
+      ) {
+        continue;
+      }
+
+      const overlap = verifiedOverlap(placement, local, target.segment);
+
+      if (!overlap.overlaps) {
+        continue;
+      }
+
+      const candidateGeometry = transformGlyphGeometry(geometry, placement);
+      const crossings = countCrossings(candidateGeometry, local, target, placed);
+      const score = scoreCandidate({
+        placement,
+        target,
+        placed,
+        spineIndex,
+        localWorldLength: local.length * scale,
+        overlapLength: overlap.length,
+        crossings,
+        currentExtent,
       });
+
+      if (best === null || score > best.score) {
+        best = {
+          placement,
+          target,
+          score,
+          connection: {
+            fromSurvivingIndex: survivingIndex,
+            toSurvivingIndex: target.letterIndex,
+            fromSegment: segmentRef(local),
+            toSegment: segmentRef(target.segment),
+            slide,
+          },
+        };
+      }
     }
+
+    if (best === null) {
+      best = findFallbackCandidate(
+        geometry,
+        targets,
+        placed,
+        scale,
+        spineIndex,
+        currentExtent,
+        survivingIndex,
+      );
+    }
+
+    if (best === null) {
+      throw new Error(`No exact parallel overlap was found for letter "${letter}"`);
+    }
+
+    best.target.usage += 1;
+    addPlaced(
+      survivingIndex,
+      best.placement,
+      transformGlyphGeometry(geometry, best.placement),
+    );
+    connections.push(best.connection);
   }
 
-  return placements;
+  return {
+    placements,
+    spineIndex,
+    connections,
+    candidatesEvaluated,
+  };
 }
 
-function spokePlacements(count: number, random: () => number): Placement[] {
-  const spokes = count <= 4 ? 2 : count <= 9 ? 3 : count <= 15 ? 4 : 5;
-  const baseScale = glyphScale(count);
-  const unit = GLYPH_HALF * baseScale;
-  const phase = random() * Math.PI * 2;
-  const lean = (random() - 0.5) * 30;
-  const placements: Placement[] = [];
-
-  for (let index = 0; index < count; index += 1) {
-    const spoke = index % spokes;
-    const level = Math.floor(index / spokes);
-    const angle = phase + spoke * ((Math.PI * 2) / spokes) + (random() - 0.5) * 0.06;
-    const distance = unit * (0.62 + level * 0.62) * (0.98 + random() * 0.06);
-    const lateral = (index % 2 === 0 ? 1 : -1) * unit * 0.1 * (level > 0 ? 1 : 0);
-    const scale = baseScale * (0.95 + random() * 0.09);
-
-    placements.push({
-      x: Math.cos(angle) * distance - Math.sin(angle) * lateral,
-      y: Math.sin(angle) * distance + Math.cos(angle) * lateral,
-      rotation:
-        (angle * 180) / Math.PI +
-        90 +
-        (level % 2 === 0 ? 0 : 45) +
-        lean +
-        (random() - 0.5) * 14,
-      scale,
-      mirror: random() < 0.5,
-    });
-  }
-
-  return placements;
-}
-
-function spiralPlacements(count: number, random: () => number): Placement[] {
-  const baseScale = glyphScale(count);
-  const unit = GLYPH_HALF * baseScale;
-  const phase = random() * Math.PI * 2;
-  const lean = (random() - 0.5) * 60;
-  const maxRadius =
-    unit * (count <= 3 ? 1.15 : Math.min(2.35, 0.85 + 0.09 * count));
-  const placements: Placement[] = [];
-
-  for (let index = 0; index < count; index += 1) {
-    const progress = (index + 0.5) / count;
-    const distance = maxRadius * Math.sqrt(progress);
-    const angle = phase + index * GOLDEN_ANGLE + (random() - 0.5) * 0.1;
-    const scale = baseScale * (0.95 + random() * 0.09);
-
-    placements.push({
-      x: Math.cos(angle) * distance,
-      y: Math.sin(angle) * distance,
-      rotation:
-        (angle * 180) / Math.PI +
-        lean +
-        (index % 2 === 0 ? 0 : 90) +
-        (random() - 0.5) * 18,
-      scale,
-      mirror: random() < 0.5,
-    });
-  }
-
-  return placements;
-}
-
-function pairPlacements(random: () => number, mode: 0 | 1 | 2): Placement[] {
-  const baseScale = glyphScale(2);
-  const unit = GLYPH_HALF * baseScale;
-  const axis = mode === 0 ? -Math.PI / 2 : mode === 1 ? 0 : Math.PI / 4;
-  const angle = axis + (random() - 0.5) * 0.12;
-  const distance = unit * (mode === 1 ? 0.56 : 0.52);
-  const leans = mode === 0 ? [-12, 12] : mode === 1 ? [90, -90] : [45, -45];
-  const tilt = (random() - 0.5) * 8;
-
-  return [0, 1].map((index) => {
-    const side = index === 0 ? -1 : 1;
-    const scale = baseScale * (0.96 + random() * 0.08);
-
-    return {
-      x: Math.cos(angle) * distance * side,
-      y: Math.sin(angle) * distance * side,
-      rotation: (leans[index] ?? 0) + tilt * side + (random() - 0.5) * 6,
-      scale,
-      mirror: random() < 0.5,
-    };
-  });
-}
-
-function balancePlacements(placements: readonly Placement[]): Placement[] {
-  if (placements.length === 0) {
-    return [];
-  }
-
+function fitPlacements(placements: readonly Placement[]): LetterTransform[] {
   let weightTotal = 0;
   let centerX = 0;
   let centerY = 0;
@@ -283,65 +763,27 @@ function balancePlacements(placements: readonly Placement[]): Placement[] {
   centerX /= weightTotal;
   centerY /= weightTotal;
 
-  const centered = placements.map((placement) => ({
-    ...placement,
-    x: placement.x - centerX,
-    y: placement.y - centerY,
-  }));
+  let maxCenterDistance = 0;
+  let maxExtent = 0;
 
-  let extent = 0;
-
-  for (const placement of centered) {
-    const radians = (placement.rotation * Math.PI) / 180;
-    const rotatedHalf =
-      GLYPH_HALF *
-      placement.scale *
-      (Math.abs(Math.cos(radians)) + Math.abs(Math.sin(radians)));
-    extent = Math.max(extent, Math.hypot(placement.x, placement.y) + rotatedHalf);
+  for (const placement of placements) {
+    const distance = Math.hypot(placement.x - centerX, placement.y - centerY);
+    const extent = distance + glyphReach(placement);
+    maxCenterDistance = Math.max(maxCenterDistance, distance);
+    maxExtent = Math.max(maxExtent, extent);
   }
 
-  const fit = extent > MAX_MARK_EXTENT ? MAX_MARK_EXTENT / extent : 1;
+  const centerFit = maxCenterDistance > 0 ? MAX_CENTER_RADIUS / maxCenterDistance : Infinity;
+  const extentFit = maxExtent > 0 ? MAX_MARK_EXTENT / maxExtent : Infinity;
+  const fit = Math.min(1, centerFit, extentFit);
 
-  return centered.map((placement) => ({
-    ...placement,
-    x: HALF_CANVAS + placement.x * fit,
-    y: HALF_CANVAS + placement.y * fit,
+  return placements.map((placement) => ({
+    x: HALF_CANVAS + (placement.x - centerX) * fit,
+    y: HALF_CANVAS + (placement.y - centerY) * fit,
+    rotation: placement.rotation,
     scale: placement.scale * fit,
+    mirror: placement.mirror,
   }));
-}
-
-function placeLetters(count: number, seed: number): Placement[] {
-  const random = createSeededRandom(seed);
-
-  const mode = layoutMode(seed);
-
-  if (count <= 1) {
-    const scale = mode === 0 ? 1.2 : mode === 1 ? 1.5 : 1.8;
-    const tilt = mode === 0 ? -18 : mode === 1 ? 0 : 18;
-
-    return balancePlacements([
-      {
-        x: 0,
-        y: 0,
-        rotation: tilt + (random() - 0.5) * 6,
-        scale: scale * (0.98 + random() * 0.04),
-        mirror: random() < 0.5,
-      },
-    ]);
-  }
-
-  if (count === 2) {
-    return balancePlacements(pairPlacements(random, mode));
-  }
-
-  const placements =
-    mode === 0
-      ? ringPlacements(count, random)
-      : mode === 1
-        ? spokePlacements(count, random)
-        : spiralPlacements(count, random);
-
-  return balancePlacements(placements);
 }
 
 export function composeSigil(intention: IntentionResult, options: ComposeOptions = {}): SigilComposition {
@@ -356,10 +798,61 @@ export function composeSigil(intention: IntentionResult, options: ComposeOptions
       height: SIGIL_HEIGHT,
       letters: [],
       isEmpty: true,
+      spineSurvivingIndex: null,
+      connections: [],
+      searchStats: {
+        maxCandidatesPerLetter: MAX_CANDIDATES_PER_LETTER,
+        candidatesEvaluated: 0,
+        acceptedConnections: 0,
+      },
     };
   }
 
-  const placements = placeLetters(count, seed);
+  const glyphs = keptCharacters.map((character): GlyphLetter => {
+    const glyph = getGlyph(character.normalized);
+
+    if (!glyph) {
+      throw new Error(`No glyph is defined for surviving letter "${character.normalized}"`);
+    }
+
+    return glyph.letter;
+  });
+
+  const layout = layoutLetters(glyphs, seed);
+  const transforms = fitPlacements(layout.placements);
+  const finalGeometries = glyphs.map((letter, index) => {
+    const geometry = getGlyphGeometry(letter);
+
+    if (!geometry) {
+      throw new Error(`No geometry is defined for letter "${letter}"`);
+    }
+
+    return transformGlyphGeometry(geometry, transforms[index]!);
+  });
+  const connections = layout.connections.map((connection): ConnectionProvenance => {
+    const fromSegment = findSegment(
+      finalGeometries[connection.fromSurvivingIndex]!,
+      connection.fromSegment,
+    );
+    const toSegment = findSegment(
+      finalGeometries[connection.toSurvivingIndex]!,
+      connection.toSegment,
+    );
+    const measured = measureSegmentOverlap(fromSegment, toSegment, GEOMETRY_EPSILON);
+
+    return {
+      fromSurvivingIndex: connection.fromSurvivingIndex,
+      fromLetter: glyphs[connection.fromSurvivingIndex]!,
+      fromSegment: connection.fromSegment,
+      toSurvivingIndex: connection.toSurvivingIndex,
+      toLetter: glyphs[connection.toSurvivingIndex]!,
+      toSegment: connection.toSegment,
+      overlapLength: measured.length,
+      slide: connection.slide,
+      angularError: measured.angularError,
+      perpendicularError: measured.perpendicularError,
+    };
+  });
 
   const letters = keptCharacters.map((character, survivingIndex): CompositionLetter => {
     const glyph = getGlyph(character.normalized);
@@ -368,10 +861,16 @@ export function composeSigil(intention: IntentionResult, options: ComposeOptions
       throw new Error(`No glyph is defined for surviving letter "${character.normalized}"`);
     }
 
-    const placement = placements[survivingIndex];
+    const transform = transforms[survivingIndex];
 
-    if (!placement) {
+    if (!transform) {
       throw new Error(`No placement was produced for surviving letter "${character.normalized}"`);
+    }
+
+    const geometry = getGlyphGeometry(glyph.letter);
+
+    if (!geometry) {
+      throw new Error(`No geometry is defined for letter "${glyph.letter}"`);
     }
 
     return {
@@ -380,13 +879,8 @@ export function composeSigil(intention: IntentionResult, options: ComposeOptions
       sourceIndex: character.index,
       survivingIndex,
       path: glyph.paths.join(' '),
-      transform: {
-        x: placement.x,
-        y: placement.y,
-        rotation: placement.rotation,
-        scale: placement.scale,
-        mirror: placement.mirror,
-      },
+      renderPath: geometryToPath(geometry),
+      transform,
     };
   });
 
@@ -396,5 +890,12 @@ export function composeSigil(intention: IntentionResult, options: ComposeOptions
     height: SIGIL_HEIGHT,
     letters,
     isEmpty: false,
+    spineSurvivingIndex: layout.spineIndex,
+    connections,
+    searchStats: {
+      maxCandidatesPerLetter: MAX_CANDIDATES_PER_LETTER,
+      candidatesEvaluated: layout.candidatesEvaluated,
+      acceptedConnections: connections.length,
+    },
   };
 }

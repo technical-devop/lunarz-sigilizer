@@ -140,7 +140,7 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
       expect(path.getAttribute('stroke')).toBe(SIGIL_STROKE);
       expect(path.getAttribute('stroke-width')).toBe(String(SIGIL_STROKE_WIDTH));
       expect(path.getAttribute('fill')).toBe('none');
-      expect(path.getAttribute('d')).toBe(composition.letters[index]!.path);
+      expect(path.getAttribute('d')).toBe(composition.letters[index]!.renderPath);
       expect(path.getAttribute('transform')).toBe(
         letterTransformToSvg(composition.letters[index]!.transform),
       );

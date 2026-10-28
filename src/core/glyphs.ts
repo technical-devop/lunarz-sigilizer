@@ -36,7 +36,7 @@ export const GLYPHS: Readonly<Record<GlyphLetter, GlyphDefinition>> = Object.fre
   H: makeGlyph('H', 'M 15 0 L 15 100', 'M 85 0 L 85 100', 'M 15 50 L 85 50'),
   I: makeGlyph('I', 'M 50 0 L 50 100', 'M 25 0 L 75 0', 'M 25 100 L 75 100'),
   J: makeGlyph('J', 'M 70 0 L 70 70 Q 70 100 45 100 Q 20 100 15 75'),
-  K: makeGlyph('K', 'M 15 0 L 15 100', 'M 85 0 L 15 55', 'M 40 43 L 90 100'),
+  K: makeGlyph('K', 'M 15 0 L 15 100', 'M 85 0 L 15 55', 'M 15 55 L 90 100'),
   L: makeGlyph('L', 'M 15 0 L 15 100 L 85 100'),
   M: makeGlyph('M', 'M 10 100 L 10 0 L 50 55 L 90 0 L 90 100'),
   N: makeGlyph('N', 'M 15 100 L 15 0 L 85 100 L 85 0'),

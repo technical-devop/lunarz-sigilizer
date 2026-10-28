@@ -1,7 +1,7 @@
 {
   "name": "lunarz-sigilizer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Deterministic intention-to-sigil composition engine with a local Tauri shell.",
   "license": "MIT",

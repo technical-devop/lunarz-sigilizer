@@ -3,10 +3,14 @@ import { describe, expect, it } from 'vitest';
 import {
   composeSigil,
   createSeededRandom,
+  MAX_COMPANION_SCALE,
+  MIN_COMPANION_SCALE,
   seedFromLetters,
   SIGIL_HEIGHT,
   SIGIL_WIDTH,
+  SPINE_SCALE,
   type CompositionLetter,
+  type SigilComposition,
 } from '../compose';
 import { GLYPH_BOX_SIZE, GLYPHS } from '../glyphs';
 import { processIntention } from '../intention';
@@ -52,35 +56,34 @@ function averageScale(letters: readonly CompositionLetter[]): number {
   );
 }
 
-function isSingleOverlapCluster(letters: readonly CompositionLetter[], ratio = 0.9): boolean {
-  const count = letters.length;
+function isSingleOverlapCluster(composition: SigilComposition): boolean {
+  const count = composition.letters.length;
   if (count <= 1) {
     return true;
   }
 
-  const visited = new Set<number>([0]);
-  const stack = [0];
+  if (composition.connections.length !== count - 1) {
+    return false;
+  }
 
-  while (stack.length > 0) {
-    const current = stack.pop()!;
+  const parent = Array.from({ length: count }, (_, index) => index);
+  const find = (value: number): number => {
+    let current = value;
+    while (parent[current] !== current) {
+      current = parent[current]!;
+    }
+    return current;
+  };
 
-    for (let other = 0; other < count; other += 1) {
-      if (visited.has(other)) {
-        continue;
-      }
-
-      const left = letters[current]!;
-      const right = letters[other]!;
-      const limit = (glyphReach(left) + glyphReach(right)) * ratio;
-
-      if (centerDistance(left, right) <= limit) {
-        visited.add(other);
-        stack.push(other);
-      }
+  for (const connection of composition.connections) {
+    const left = find(connection.fromSurvivingIndex);
+    const right = find(connection.toSurvivingIndex);
+    if (left !== right) {
+      parent[right] = left;
     }
   }
 
-  return visited.size === count;
+  return new Set(Array.from({ length: count }, (_, index) => find(index))).size === 1;
 }
 
 function markExtent(letters: readonly CompositionLetter[]): number {
@@ -165,6 +168,10 @@ describe('composeSigil', () => {
     expect(composition.letters.map((letter) => letter.survivingIndex)).toEqual([0, 1, 2, 3, 4, 5]);
     expect(composition.isEmpty).toBe(false);
 
+    const spineIndex = composition.spineSurvivingIndex;
+    expect(spineIndex).not.toBeNull();
+    const spineScale = composition.letters[spineIndex!]!.transform.scale;
+
     composition.letters.forEach((letter, index) => {
       expect(letter.glyphId).toBe(letter.letter);
       expect(letter.path).toBe(GLYPHS[letter.letter]!.paths.join(' '));
@@ -172,8 +179,18 @@ describe('composeSigil', () => {
       expect(Number.isFinite(letter.transform.x)).toBe(true);
       expect(Number.isFinite(letter.transform.y)).toBe(true);
       expect(Number.isFinite(letter.transform.rotation)).toBe(true);
-      expect(letter.transform.scale).toBeGreaterThanOrEqual(0.5);
-      expect(letter.transform.scale).toBeLessThanOrEqual(0.82);
+      expect(letter.transform.scale).toBeGreaterThan(0);
+
+      if (index === spineIndex) {
+        expect(letter.transform.scale).toBeLessThanOrEqual(SPINE_SCALE + 1e-9);
+      } else {
+        expect(letter.transform.scale).toBeLessThanOrEqual(
+          spineScale * (MAX_COMPANION_SCALE / SPINE_SCALE) + 1e-9,
+        );
+        expect(letter.transform.scale).toBeGreaterThanOrEqual(
+          spineScale * (MIN_COMPANION_SCALE / SPINE_SCALE) - 1e-9,
+        );
+      }
     });
   });
 
@@ -284,7 +301,7 @@ describe('cohesive sigil geometry', () => {
         const composition = composeSigil(processIntention(phrase), { seed });
 
         expect(composition.letters).toHaveLength(count);
-        expect(isSingleOverlapCluster(composition.letters)).toBe(true);
+        expect(isSingleOverlapCluster(composition)).toBe(true);
       }
     }
   });

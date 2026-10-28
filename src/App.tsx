@@ -5,7 +5,7 @@ import {
   compositionToExportSvg,
   letterTransformToSvg,
   processIntention,
-  seedFromLetters,
+  variantSeeds,
   SIGIL_BACKGROUND,
   SIGIL_GLOW,
   SIGIL_STROKE,
@@ -41,11 +41,6 @@ function reasonLabel(reason: string): string {
 
 function codePointLabel(codePoint: number): string {
   return `U+${codePoint.toString(16).toUpperCase().padStart(4, '0')}`;
-}
-
-function variantSeeds(letters: readonly string[], regen: number): number[] {
-  const base = seedFromLetters(letters);
-  return [0, 1, 2].map((slot) => (base + regen * 7919 + slot * 0x9e3779b9) >>> 0);
 }
 
 /**
@@ -131,7 +126,7 @@ function SigilSvg({
             style={{ ['--dx' as string]: `${dx}px`, ['--dy' as string]: `${dy}px`, ['--i' as string]: letter.survivingIndex }}
           >
             <path
-              d={letter.path}
+              d={letter.renderPath}
               transform={letterTransformToSvg(letter.transform)}
               stroke={SIGIL_STROKE}
               strokeWidth={SIGIL_STROKE_WIDTH}

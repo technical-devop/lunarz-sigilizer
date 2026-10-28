@@ -1,3 +1,4 @@
+import { formatCoordinate } from './geometry';
 import { GLYPH_BOX_SIZE } from './glyphs';
 import type { SigilComposition } from './compose';
 
@@ -26,8 +27,7 @@ export interface SvgOptions {
 }
 
 function formatNumber(value: number): string {
-  const rounded = Math.round(value * 1000) / 1000;
-  return String(Object.is(rounded, -0) ? 0 : rounded);
+  return formatCoordinate(value);
 }
 
 function escapeAttribute(value: string): string {
@@ -75,7 +75,7 @@ export function compositionToSvg(composition: SigilComposition, options: SvgOpti
       ? ` data-letter="${escapeAttribute(letter.letter)}" data-source-index="${letter.sourceIndex}" data-surviving-index="${letter.survivingIndex}"`
       : '';
     return [
-      `<path d="${letter.path}"`,
+      `<path d="${letter.renderPath}"`,
       `transform="${transform}"`,
       'fill="none"',
       `stroke="${stroke}"`,
