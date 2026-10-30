@@ -10,10 +10,17 @@ import {
   SIGIL_GLOW,
   SIGIL_STROKE,
   SIGIL_STROKE_WIDTH,
+  strokeWidthForScale,
 } from '../svg';
 
+function parseMatrix(value: string): number[] {
+  const match = value.match(/^matrix\(([^)]+)\)$/);
+  expect(match).not.toBeNull();
+  return match![1]!.trim().split(/\s+/).map(Number);
+}
+
 describe('compositionToSvg base scene', () => {
-  it('renders one path per surviving letter with shared geometry', () => {
+  it('renders one path per surviving letter with the shared prototype scene', () => {
     const composition = composeSigil(processIntention('LUNARZ'), { seed: 99 });
     const svg = compositionToSvg(composition);
 
@@ -24,16 +31,29 @@ describe('compositionToSvg base scene', () => {
     expect(svg).toContain(letterTransformToSvg(composition.letters[0]!.transform));
   });
 
-  it('shares the explicit preview stroke and background', () => {
+  it('shares the explicit preview stroke and night background', () => {
     const composition = composeSigil(processIntention('SIGIL'), { seed: 7 });
     const svg = compositionToExportSvg(composition);
 
     expect(svg).toContain(`stroke="${SIGIL_STROKE}"`);
-    expect(svg).toContain(`stroke-width="${SIGIL_STROKE_WIDTH}"`);
+    // Per-letter compensation keeps the *effective* rendered width at
+    // SIGIL_STROKE_WIDTH (SVG scales stroke-width by the path transform).
+    {
+      const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+      const pathEls = Array.from(doc.querySelectorAll('path'));
+      expect(pathEls).toHaveLength(composition.letters.length);
+      for (const [index, pathEl] of pathEls.entries()) {
+        const letter = composition.letters[index]!;
+        expect(Number(pathEl.getAttribute('stroke-width'))).toBeCloseTo(
+          strokeWidthForScale(letter.transform.scale),
+          9,
+        );
+      }
+    }
     expect(svg).toContain('<radialGradient');
     expect(svg).toContain(`stop-color="${SIGIL_GLOW}"`);
     expect(svg).toContain(`stop-color="${SIGIL_BACKGROUND}"`);
-    expect(svg).toContain(`fill="url(#sigil-night)"`);
+    expect(svg).toContain('fill="url(#sigil-night)"');
     expect(svg).toContain(
       `<rect x="0" y="0" width="${composition.width}" height="${composition.height}"`,
     );
@@ -81,7 +101,6 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
     expect(svg).not.toContain('source-letter');
     expect(svg).not.toContain('surviving-index');
     expect(svg).not.toMatch(/data-seed|seed["=]/i);
-    // Only the generic product title remains; no intention words leak.
     expect(svg).toContain('<title>Lunarz Sigil</title>');
     expect(svg).not.toContain('intention');
     expect(svg).not.toContain('derivation');
@@ -92,7 +111,6 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
 
     expect(svg).not.toContain('<image');
     expect(svg).not.toContain('https://');
-    // xmlns namespace is the only permitted http reference.
     expect(svg.match(/http:\/\/(?!www\.w3\.org)/)).toBeNull();
     expect(svg).not.toContain('href=');
     expect(svg).not.toContain('xlink');
@@ -102,12 +120,11 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
     const composition = composeSigil(processIntention('LUNARZ'), { seed: 99 });
     const withMetadata = compositionToSvg(composition, { includeMetadata: true });
 
-    expect(withMetadata).toContain('data-seed="99"');
+    expect(withMetadata).toContain(`data-seed="${composition.seed}"`);
     expect(withMetadata).toContain('data-letter="L"');
     expect(withMetadata).toContain('data-source-index="0"');
     expect(withMetadata).toContain('data-surviving-index="0"');
 
-    // Default export path stays clean.
     const clean = compositionToSvg(composition);
     expect(clean).not.toContain('data-seed');
     expect(clean).not.toContain('data-letter');
@@ -121,7 +138,9 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
     expect(doc.querySelector('parsererror')).toBeNull();
     const root = doc.documentElement;
     expect(root.tagName.toLowerCase()).toBe('svg');
-    expect(root.getAttribute('viewBox')).toBe(`0 0 ${composition.width} ${composition.height}`);
+    expect(root.getAttribute('viewBox')).toBe(
+      `0 0 ${composition.width} ${composition.height}`,
+    );
 
     const gradient = doc.querySelector('radialGradient');
     expect(gradient).not.toBeNull();
@@ -138,7 +157,15 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
     expect(paths).toHaveLength(composition.letters.length);
     for (const [index, path] of paths.entries()) {
       expect(path.getAttribute('stroke')).toBe(SIGIL_STROKE);
-      expect(path.getAttribute('stroke-width')).toBe(String(SIGIL_STROKE_WIDTH));
+      const letter = composition.letters[index]!;
+      expect(Number(path.getAttribute('stroke-width'))).toBeCloseTo(
+        strokeWidthForScale(letter.transform.scale),
+        9,
+      );
+      // Effective rendered width (attribute scaled by the path transform).
+      expect(
+        Number(path.getAttribute('stroke-width')) * Math.abs(letter.transform.scale),
+      ).toBeCloseTo(SIGIL_STROKE_WIDTH, 6);
       expect(path.getAttribute('fill')).toBe('none');
       expect(path.getAttribute('d')).toBe(composition.letters[index]!.renderPath);
       expect(path.getAttribute('transform')).toBe(
@@ -150,15 +177,30 @@ describe('exported SVG carries no inspection or derivation metadata', () => {
 });
 
 describe('letterTransformToSvg', () => {
-  it('serializes translation, rotation, scale, and glyph centering', () => {
-    expect(letterTransformToSvg({ x: 10, y: 20, rotation: 15, scale: 0.5, mirror: false })).toBe(
-      'translate(10 20) rotate(15) scale(0.5 0.5) translate(-50 -50)',
+  it('serializes the prototype affine matrix with translation and scale', () => {
+    const matrix = parseMatrix(
+      letterTransformToSvg({ x: 10, y: 20, rotation: 15, scale: 0.5, mirror: false }),
     );
+    const angle = (15 * Math.PI) / 180;
+    const cosine = Math.cos(angle) * 0.5;
+    const sine = Math.sin(angle) * 0.5;
+
+    expect(matrix[0]).toBeCloseTo(cosine, 8);
+    expect(matrix[1]).toBeCloseTo(sine, 8);
+    expect(matrix[2]).toBeCloseTo(-sine, 8);
+    expect(matrix[3]).toBeCloseTo(cosine, 8);
+    expect(matrix[4]).toBe(10);
+    expect(matrix[5]).toBe(20);
   });
 
-  it('mirrors the horizontal scale without changing the vertical scale', () => {
-    expect(letterTransformToSvg({ x: 0, y: 0, rotation: 0, scale: 0.75, mirror: true })).toBe(
-      'translate(0 0) rotate(0) scale(-0.75 0.75) translate(-50 -50)',
+  it('mirrors the horizontal axis without changing the vertical axis', () => {
+    const matrix = parseMatrix(
+      letterTransformToSvg({ x: 0, y: 0, rotation: 0, scale: 0.75, mirror: true }),
     );
+
+    expect(matrix[0]).toBeCloseTo(-0.75, 12);
+    expect(matrix[1]).toBeCloseTo(0, 12);
+    expect(matrix[2]).toBeCloseTo(0, 12);
+    expect(matrix[3]).toBeCloseTo(0.75, 12);
   });
 });

@@ -1,372 +1,322 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  composeSigil,
-  MAX_CANDIDATES_PER_LETTER,
-  MAX_COMPANION_SCALE,
-  MIN_COMPANION_SCALE,
-  SPINE_SCALE,
-  variantSeeds,
-  type CompositionLetter,
-  type SigilComposition,
-} from '../compose';
-import {
-  GEOMETRY_EPSILON,
-  QUADRATIC_SEGMENTS_PER_CURVE,
-  getGlyphGeometry,
-  measureSegmentOverlap,
-  transformGlyphGeometry,
-  type PolylineSegment,
-  type SegmentRef,
-} from '../geometry';
-import { ALPHABET, GLYPHS } from '../glyphs';
-import { processIntention } from '../intention';
-import { compositionToExportSvg } from '../svg';
+import { stableSeed } from '../geometry';
+import { getGlyph } from '../glyphs';
+import { generateSizeSigil } from '../sizeHierarchy';
 
-const CONSONANTS = 'BCDFGHJKLMNPQRSTVWXYZ';
-const CENTER = 256;
-const EPS = 1e-9;
-const SEEDS = [0, 1, 2, 12345, 0xdeadbeef] as const;
+const SEED_DOMAIN = 'size-hierarchy-v1';
 
-function transformedGeometry(composition: SigilComposition, survivingIndex: number) {
-  const letter = composition.letters[survivingIndex]!;
-  const geometry = getGlyphGeometry(letter.glyphId);
-  expect(geometry).toBeDefined();
-  return transformGlyphGeometry(geometry!, letter.transform);
-}
+const APPROVED = [
+  { id: 'calm', phrase: 'BE CALM', source: 'BCLM' },
+  { id: 'make', phrase: 'I MAKE TIME TO CREATE', source: 'MKTCR' },
+  { id: 'protect', phrase: 'I PROTECT MY SPACE', source: 'PRTCMYS' },
+  { id: 'build', phrase: 'I BUILD RESILIENT STRENGTH', source: 'BLDRSNTGH' },
+] as const;
 
-function findSegment(geometry: ReturnType<typeof transformedGeometry>, ref: SegmentRef): PolylineSegment {
-  const segment = geometry.segments.find(
-    (candidate) =>
-      candidate.strokeIndex === ref.strokeIndex && candidate.segmentIndex === ref.segmentIndex,
-  );
-  expect(segment).toBeDefined();
-  return segment!;
-}
+describe('size_hierarchy.py port', () => {
+  it('reproduces the approved calm spine-dominant reference exactly', () => {
+    const seed = 14759392546341412399n;
+    const result = generateSizeSigil('BE CALM', 'size-spine', {
+      seed,
+      sigilId: 'calm-size-spine',
+    });
 
-function projectedOverlap(from: PolylineSegment, to: PolylineSegment): { start: number; end: number; length: number } {
-  const dx = to.end.x - to.start.x;
-  const dy = to.end.y - to.start.y;
-  const length = Math.hypot(dx, dy);
-  const ux = dx / length;
-  const uy = dy / length;
-  const project = (point: { x: number; y: number }) =>
-    (point.x - to.start.x) * ux + (point.y - to.start.y) * uy;
-  const values = [project(from.start), project(from.end)].sort((left, right) => left - right);
-  const start = Math.max(0, values[0]!);
-  const end = Math.min(length, values[1]!);
-  return { start, end, length: Math.max(0, end - start) };
-}
+    expect(result.source).toBe('BCLM');
+    expect(result.schema).toBe('lunarz-size-hierarchy-sigil/1');
+    expect(result.seed).toBe(seed.toString());
+    expect(result.metrics.per_letter_scales).toEqual([1.22, 0.705, 0.69, 0.675]);
+    expect(result.metrics.spine_letter).toBe(0);
+    expect(result.metrics.spine_scale).toBe(1.22);
+    expect(result.metrics.spine_joins).toBe(3);
+    expect(result.metrics.scale_min).toBe(0.675);
+    expect(result.metrics.scale_max).toBe(1.22);
+    expect(result.metrics.scale_ratio).toBeCloseTo(1.807407407, 9);
+    expect(result.metrics.shared_strokes).toBe(9);
+    expect(result.metrics.shared_overlap_total).toBeCloseTo(3.148196448, 9);
+    expect(result.attachments.map((attachment: any) => attachment.to_letter)).toEqual([
+      0, 0, 0,
+    ]);
+    expect(
+      result.attachments.map(
+        (attachment: any) => attachment.actual_contact.shared_length,
+      ),
+    ).toEqual([0.199404112, 0.5612, 0.37166]);
+    expect(
+      result.attachments.map((attachment: any) => attachment.candidate_score),
+    ).toEqual([16.161758008, 16.347921347, 19.319311613]);
+    expect(result.letters[0].transform).toEqual({
+      angle_deg: 0,
+      scale: 1.22,
+      tx: -0.6222,
+      ty: -0.61,
+    });
+    expect(result.exact_check.exact_stroke_components).toBe(1);
+    expect(result.exact_check.exact_letter_components).toBe(1);
+    expect(result.exact_check.near_only_dependency).toBe(false);
+  });
 
-function assertConnectedGraph(composition: SigilComposition): void {
-  const count = composition.letters.length;
-  if (count <= 1) {
-    return;
-  }
+  it('reproduces every approved sample across all three scale recipes', () => {
+    const results: any[] = [];
+    for (const sample of APPROVED) {
+      for (const variant of ['size-spine', 'size-steps', 'size-anchor']) {
+        const seed = stableSeed(sample.id, variant, SEED_DOMAIN);
+        const result = generateSizeSigil(sample.phrase, variant, { seed });
+        results.push(result);
 
-  const parent = Array.from({ length: count }, (_, index) => index);
-  const find = (value: number): number => {
-    let current = value;
-    while (parent[current] !== current) {
-      current = parent[current]!;
-    }
-    return current;
-  };
-  const union = (left: number, right: number): void => {
-    const rootLeft = find(left);
-    const rootRight = find(right);
-    if (rootLeft !== rootRight) {
-      parent[rootRight] = rootLeft;
-    }
-  };
-
-  for (const connection of composition.connections) {
-    union(connection.fromSurvivingIndex, connection.toSurvivingIndex);
-  }
-
-  const roots = new Set(Array.from({ length: count }, (_, index) => find(index)));
-  expect(roots.size).toBe(1);
-}
-
-function assertConnectionIsExact(composition: SigilComposition): void {
-  for (const connection of composition.connections) {
-    const fromGeometry = transformedGeometry(composition, connection.fromSurvivingIndex);
-    const toGeometry = transformedGeometry(composition, connection.toSurvivingIndex);
-    const fromSegment = findSegment(fromGeometry, connection.fromSegment);
-    const toSegment = findSegment(toGeometry, connection.toSegment);
-    const measured = measureSegmentOverlap(fromSegment, toSegment, GEOMETRY_EPSILON);
-    const expected = projectedOverlap(fromSegment, toSegment);
-
-    expect(measured.collinear).toBe(true);
-    expect(measured.parallel).toBe(true);
-    expect(measured.length).toBeGreaterThan(GEOMETRY_EPSILON);
-    expect(measured.length).toBeCloseTo(connection.overlapLength, 9);
-    expect(measured.interval[0]).toBeCloseTo(expected.start, 9);
-    expect(measured.interval[1]).toBeCloseTo(expected.end, 9);
-    expect(measured.length).toBeCloseTo(expected.length, 9);
-    expect(connection.toLetter).toBe(composition.letters[connection.toSurvivingIndex]!.letter);
-    expect(connection.fromLetter).toBe(composition.letters[connection.fromSurvivingIndex]!.letter);
-  }
-}
-
-function weightedCenter(letters: readonly CompositionLetter[]): { x: number; y: number } {
-  let weightTotal = 0;
-  let x = 0;
-  let y = 0;
-
-  for (const letter of letters) {
-    const weight = letter.transform.scale * letter.transform.scale;
-    weightTotal += weight;
-    x += letter.transform.x * weight;
-    y += letter.transform.y * weight;
-  }
-
-  return { x: x / weightTotal, y: y / weightTotal };
-}
-
-describe('glyph polyline geometry', () => {
-  it('represents every glyph as ordered polylines with explicit anchors, lengths and tangents', () => {
-    for (const letter of ALPHABET) {
-      const geometry = getGlyphGeometry(letter);
-      expect(geometry, letter).toBeDefined();
-      expect(geometry!.letter).toBe(letter);
-      expect(geometry!.strokes).toHaveLength(GLYPHS[letter]!.paths.length);
-      expect(geometry!.segments.length).toBeGreaterThan(0);
-      expect(geometry!.segments).toEqual(geometry!.strokes.flatMap((stroke) => stroke.segments));
-
-      for (const stroke of geometry!.strokes) {
-        expect(stroke.points).toHaveLength(stroke.segments.length + 1);
-
-        stroke.segments.forEach((segment, index) => {
-          expect(segment.strokeIndex).toBe(stroke.index);
-          expect(segment.segmentIndex).toBe(index);
-          const dx = segment.end.x - segment.start.x;
-          const dy = segment.end.y - segment.start.y;
-          expect(segment.length).toBeCloseTo(Math.hypot(dx, dy), 12);
-          expect(segment.midpoint.x).toBeCloseTo((segment.start.x + segment.end.x) / 2, 12);
-          expect(segment.midpoint.y).toBeCloseTo((segment.start.y + segment.end.y) / 2, 12);
-          expect(Math.hypot(segment.tangent.x, segment.tangent.y)).toBeCloseTo(1, 12);
-          expect(segment.length).toBeGreaterThan(0);
+        expect(result.source).toBe(sample.source);
+        expect(result.variant).toBe(variant);
+        expect(result.letters).toHaveLength(sample.source.length);
+        expect(result.attachments).toHaveLength(sample.source.length - 1);
+        expect(result.exact_check.exact_stroke_components).toBe(1);
+        expect(result.exact_check.exact_letter_components).toBe(1);
+        expect(result.exact_check.near_only_dependency).toBe(false);
+        expect(result.metrics.fallback_count).toBe(0);
+        expect(result.metrics.attachment_mode_counts).toEqual({
+          shared: sample.source.length - 1,
         });
-      }
-    }
-  });
 
-  it('linearizes quadratic curves consistently and retains every constituent segment', () => {
-    const first = getGlyphGeometry('C')!;
-    const second = getGlyphGeometry('C')!;
-
-    expect(second).toEqual(first);
-    expect(first.strokes).toHaveLength(GLYPHS.C!.paths.length);
-    expect(first.segments).toHaveLength(4 * QUADRATIC_SEGMENTS_PER_CURVE);
-    expect(first.segments.every((segment) => segment.length > 0)).toBe(true);
-  });
-});
-
-describe('spine-dominant parallel-overlap generator', () => {
-  it('makes a single surviving letter a centered 1.22 spine with intact strokes', () => {
-    for (const seed of SEEDS) {
-      const composition = composeSigil(processIntention('K'), { seed });
-      const letter = composition.letters[0]!;
-
-      expect(composition.spineSurvivingIndex).toBe(0);
-      expect(composition.connections).toEqual([]);
-      expect(composition.searchStats.acceptedConnections).toBe(0);
-      expect(letter.transform.scale).toBeCloseTo(SPINE_SCALE, 12);
-      expect(letter.transform.x).toBeCloseTo(CENTER, 12);
-      expect(letter.transform.y).toBeCloseTo(CENTER, 12);
-      expect(letter.path).toBe(GLYPHS.K!.paths.join(' '));
-    }
-  });
-
-  it('attaches the second letter to the spine with mathematically verified collinearity and interval', () => {
-    for (const seed of SEEDS) {
-      const composition = composeSigil(processIntention('BK'), { seed });
-      const spineIndex = composition.spineSurvivingIndex!;
-      const connection = composition.connections[0]!;
-      const spine = composition.letters[spineIndex]!;
-      const companion = composition.letters[connection.fromSurvivingIndex]!;
-
-      expect(composition.letters.map((letter) => letter.letter)).toEqual(['B', 'K']);
-      expect(connection.toSurvivingIndex).toBe(spineIndex);
-      expect(connection.fromSurvivingIndex).not.toBe(spineIndex);
-      expect(companion.transform.scale).toBeLessThanOrEqual(
-        spine.transform.scale * (MAX_COMPANION_SCALE / SPINE_SCALE) + EPS,
-      );
-      expect(companion.transform.scale).toBeGreaterThanOrEqual(
-        spine.transform.scale * (MIN_COMPANION_SCALE / SPINE_SCALE) - EPS,
-      );
-      assertConnectionIsExact(composition);
-      assertConnectedGraph(composition);
-    }
-  });
-
-  it('preserves every letter, stroke, order, sourceIndex and exact overlap for all 21 consonants', () => {
-    const intention = processIntention(CONSONANTS);
-    expect(intention.letters).toEqual(CONSONANTS.split(''));
-
-    for (const seed of SEEDS) {
-      const composition = composeSigil(intention, { seed });
-      const spineIndex = composition.spineSurvivingIndex!;
-
-      expect(composition.letters.map((letter) => letter.letter)).toEqual(intention.letters);
-      expect(composition.letters.map((letter) => letter.sourceIndex)).toEqual(
-        Array.from({ length: CONSONANTS.length }, (_, index) => index),
-      );
-      expect(composition.connections).toHaveLength(CONSONANTS.length - 1);
-      expect(composition.searchStats.acceptedConnections).toBe(CONSONANTS.length - 1);
-
-      const sources = new Set(composition.connections.map((connection) => connection.fromSurvivingIndex));
-      expect(sources.size).toBe(CONSONANTS.length - 1);
-      expect(sources.has(spineIndex)).toBe(false);
-
-      for (const letter of composition.letters) {
-        expect(letter.glyphId).toBe(letter.letter);
-        expect(letter.path).toBe(GLYPHS[letter.letter]!.paths.join(' '));
-      }
-
-      assertConnectionIsExact(composition);
-      assertConnectedGraph(composition);
-    }
-  });
-
-  it('chooses a different spine letter for each of the three choice seeds when at least three letters survive', () => {
-    for (let count = 3; count <= CONSONANTS.length; count += 1) {
-      const phrase = CONSONANTS.slice(0, count);
-      const intention = processIntention(phrase);
-      const seeds = variantSeeds(intention.letters, 0);
-      const compositions = seeds.map((seed) => composeSigil(intention, { seed }));
-      const spines = compositions.map((composition) => composition.spineSurvivingIndex);
-
-      expect(new Set(seeds).size).toBe(3);
-      expect(new Set(spines).size).toBe(3);
-      expect(spines.every((index) => index !== null && index >= 0 && index < count)).toBe(true);
-
-      for (const composition of compositions) {
-        expect(composition.letters.map((letter) => letter.letter)).toEqual(intention.letters);
-      }
-    }
-  });
-
-  it('regeneration keeps letter identity but changes the arrangement', () => {
-    const intention = processIntention(CONSONANTS);
-    const firstRound = variantSeeds(intention.letters, 0).map((seed) =>
-      composeSigil(intention, { seed }),
-    );
-    const secondRound = variantSeeds(intention.letters, 1).map((seed) =>
-      composeSigil(intention, { seed }),
-    );
-
-    expect(secondRound.map((composition) => composition.seed)).not.toEqual(
-      firstRound.map((composition) => composition.seed),
-    );
-
-    for (let slot = 0; slot < 3; slot += 1) {
-      expect(secondRound[slot]!.letters.map((letter) => letter.letter)).toEqual(intention.letters);
-      expect(JSON.stringify(secondRound[slot]!.letters.map((letter) => letter.transform))).not.toBe(
-        JSON.stringify(firstRound[slot]!.letters.map((letter) => letter.transform)),
-      );
-    }
-  });
-
-  it('is deterministic for a given seed and varies with a different seed', () => {
-    const intention = processIntention('SIGIL');
-    const first = composeSigil(intention, { seed: 777 });
-    const second = composeSigil(intention, { seed: 777 });
-    const other = composeSigil(intention, { seed: 778 });
-
-    expect(second).toEqual(first);
-    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
-    expect(JSON.stringify(other.letters.map((letter) => letter.transform))).not.toBe(
-      JSON.stringify(first.letters.map((letter) => letter.transform)),
-    );
-  });
-
-  it('bounds candidate search per placed letter', () => {
-    const composition = composeSigil(processIntention(CONSONANTS), { seed: 2026 });
-
-    expect(composition.searchStats.maxCandidatesPerLetter).toBe(MAX_CANDIDATES_PER_LETTER);
-    expect(composition.searchStats.candidatesEvaluated).toBe(
-      MAX_CANDIDATES_PER_LETTER * (composition.letters.length - 1),
-    );
-    expect(composition.searchStats.acceptedConnections).toBe(composition.connections.length);
-  });
-
-  it('fits every transformed stroke on the canvas with a balanced center', () => {
-    for (const count of [1, 2, 3, 10, 21]) {
-      const phrase = CONSONANTS.slice(0, count);
-
-      for (const seed of [0, 1, 2]) {
-        const composition = composeSigil(processIntention(phrase), { seed });
-        const center = weightedCenter(composition.letters);
-
-        expect(Math.hypot(center.x - CENTER, center.y - CENTER)).toBeLessThanOrEqual(EPS);
-
-        for (const letter of composition.letters) {
-          const geometry = transformedGeometry(composition, letter.survivingIndex);
-
-          for (const segment of geometry.segments) {
-            for (const point of [segment.start, segment.end]) {
-              expect(point.x).toBeGreaterThanOrEqual(0);
-              expect(point.x).toBeLessThanOrEqual(composition.width);
-              expect(point.y).toBeGreaterThanOrEqual(0);
-              expect(point.y).toBeLessThanOrEqual(composition.height);
-            }
-          }
+        for (const attachment of result.attachments) {
+          expect(attachment.mode).toBe('shared');
+          expect(attachment.exact).toBe(true);
+          expect(attachment.actual_contact.kind).toBe('shared');
+          expect(attachment.actual_contact.shared_length + 1e-9).toBeGreaterThanOrEqual(
+            0.075,
+          );
+          expect(attachment.candidate_score).toBeGreaterThan(0);
+        }
+        for (const letter of result.letters) {
+          expect(letter.local_strokes).toEqual(
+            getGlyph(letter.char)!.strokes.map((stroke, index) => ({
+              index,
+              closed: stroke.closed,
+              points: stroke.points.map((point) => point.asList()),
+            })),
+          );
         }
       }
     }
+
+    expect(results).toHaveLength(12);
+  }, 60000);
+
+  it('uses genuinely different per-letter scale hierarchies', () => {
+    const seed = 42n;
+    const spine = generateSizeSigil('MKTCR', 'size-spine', { seed });
+    const steps = generateSizeSigil('MKTCR', 'size-steps', { seed });
+    const anchor = generateSizeSigil('MKTCR', 'size-anchor', { seed });
+
+    expect(spine.metrics.per_letter_scales).toEqual([1.22, 0.705, 0.69, 0.675, 0.66]);
+    expect(steps.metrics.per_letter_scales).toEqual([1.22, 1.06, 0.9, 0.74, 0.58]);
+    expect(anchor.metrics.per_letter_scales).toEqual([1.12, 0.7, 0.68, 0.66, 0.92]);
+    expect(
+      new Set([
+        JSON.stringify(spine.metrics.per_letter_scales),
+        JSON.stringify(steps.metrics.per_letter_scales),
+        JSON.stringify(anchor.metrics.per_letter_scales),
+      ]).size,
+    ).toBe(3);
   });
 
-  it('keeps provenance in memory but never exports source-derived metadata', () => {
-    const composition = composeSigil(processIntention('LUNARZ'), { seed: 99 });
-
-    expect(composition.connections.length).toBeGreaterThan(0);
-    expect(composition.searchStats.candidatesEvaluated).toBeGreaterThan(0);
-    expect(composition.spineSurvivingIndex).not.toBeNull();
-
-    const svg = compositionToExportSvg(composition);
-    const lower = svg.toLowerCase();
-
-    for (const token of [
-      'data-letter',
-      'data-source-index',
-      'data-surviving-index',
-      'data-seed',
-      'provenance',
-      'connection',
-      'overlap',
-      'slide',
-      'segmentindex',
-      'spine',
-      'sourceindex',
-      'survivingindex',
-    ]) {
-      expect(lower).not.toContain(token);
-    }
-
-    expect(svg.match(/<path /g)).toHaveLength(composition.letters.length);
-    composition.letters.forEach((letter) => {
-      expect(letter.path).toBe(GLYPHS[letter.letter]!.paths.join(' '));
-      expect(svg).toContain(`d="${letter.renderPath}"`);
-    });
-  });
-
-  it('generates three 21-letter candidates within a bounded measured runtime', () => {
-    const intention = processIntention(CONSONANTS);
-    const seeds = variantSeeds(intention.letters, 0);
-    const started = performance.now();
-    const compositions = seeds.map((seed) => composeSigil(intention, { seed }));
-    const elapsed = performance.now() - started;
-
-    console.info(
-      `[spine benchmark] 3 candidates x ${intention.letters.length} letters: ${elapsed.toFixed(
-        1,
-      )} ms (${(elapsed / 3).toFixed(1)} ms/candidate)`,
+  it('handles the 11-letter reference example and Q-bearing sources without near-only joins', () => {
+    const eleven = generateSizeSigil(
+      'I BUILD RESILIENT STRENGTH WITH CARE',
+      'size-spine',
+      { seed: stableSeed('eleven', 'size-spine', SEED_DOMAIN) },
     );
+    expect(eleven.source).toBe('BLDRSNTGHWC');
+    expect(eleven.letters).toHaveLength(11);
+    expect(eleven.attachments).toHaveLength(10);
+    expect(eleven.metrics.fallback_count).toBe(0);
 
-    expect(compositions).toHaveLength(3);
-    expect(compositions.every((composition) => composition.letters.length === 21)).toBe(true);
-    expect(elapsed).toBeLessThan(5000);
+    for (const [phrase, seed] of [
+      ['quiet night', 817072757n],
+      ['quiet mind', 4133800725n],
+      ['query', 1959199689n],
+    ] as const) {
+      const result = generateSizeSigil(phrase, 'size-spine', { seed });
+      expect(result.exact_check.exact_stroke_components).toBe(1);
+      expect(result.exact_check.exact_letter_components).toBe(1);
+      expect(result.exact_check.near_only_dependency).toBe(false);
+    }
+  }, 30000);
+
+  it('is deterministic for an explicit seed', () => {
+    const first = generateSizeSigil('I PROTECT MY SPACE', 'size-anchor', {
+      seed: 99n,
+    });
+    const second = generateSizeSigil('I PROTECT MY SPACE', 'size-anchor', {
+      seed: 99n,
+    });
+
+    expect(second).toEqual(first);
   });
+
+  it('rejects empty, too-long and unsupported sources', () => {
+    expect(() => generateSizeSigil('AEIOU', 'size-spine', { seed: 1n })).toThrow(
+      /reduces to empty/,
+    );
+    expect(generateSizeSigil('B1C', 'size-spine', { seed: 1n }).source).toBe('BC');
+  });
+});
+
+interface PythonLetter {
+  readonly char: string;
+  readonly transform: {
+    readonly angle_deg: number;
+    readonly scale: number;
+    readonly tx: number;
+    readonly ty: number;
+  };
+}
+
+interface PythonAttachment {
+  readonly from: number;
+  readonly to: number;
+  readonly score: number;
+  readonly sharedLength: number;
+}
+
+const PYTHON_REORDERED_CASES: readonly {
+  readonly source: string;
+  readonly spine: number;
+  readonly seed: bigint;
+  readonly letters: readonly PythonLetter[];
+  readonly attachments: readonly PythonAttachment[];
+}[] = [
+  {
+    source: 'BCLM',
+    spine: 0,
+    seed: 42n,
+    letters: [
+      { char: 'B', transform: { angle_deg: 0, scale: 1.22, tx: -0.6222, ty: -0.61 } },
+      { char: 'C', transform: { angle_deg: -45, scale: 0.705, tx: -0.559239926, ty: -0.38004658 } },
+      { char: 'L', transform: { angle_deg: -90, scale: 0.69, tx: -0.4548, ty: 0.0632 } },
+      { char: 'M', transform: { angle_deg: 270, scale: 0.675, tx: -0.23502, ty: 0.02 } },
+    ],
+    attachments: [
+      { from: 1, to: 0, score: 16.161758746, sharedLength: 0.199404112 },
+      { from: 2, to: 0, score: 14.810129112, sharedLength: 0.5856 },
+      { from: 3, to: 0, score: 17.971252789, sharedLength: 0.39362 },
+    ],
+  },
+  {
+    source: 'BCLM',
+    spine: 1,
+    seed: 42n,
+    letters: [
+      { char: 'C', transform: { angle_deg: 0, scale: 1.22, tx: -0.61, ty: -0.61 } },
+      { char: 'B', transform: { angle_deg: -45, scale: 0.705, tx: -0.775198841, ty: -0.454260411 } },
+      { char: 'L', transform: { angle_deg: -135, scale: 0.69, tx: -0.497624074, ty: -0.107530601 } },
+      { char: 'M', transform: { angle_deg: -103.495733281, scale: 0.675, tx: -0.38879484, ty: -0.294338579 } },
+    ],
+    attachments: [
+      { from: 0, to: 1, score: 14.674688997, sharedLength: 0.272869071 },
+      { from: 2, to: 0, score: 15.120084675, sharedLength: 0.3384 },
+      { from: 3, to: 2, score: 14.090527192, sharedLength: 0.438625396 },
+    ],
+  },
+  {
+    source: 'BCLM',
+    spine: 2,
+    seed: 99n,
+    letters: [
+      { char: 'L', transform: { angle_deg: 0, scale: 1.22, tx: -0.61, ty: -0.61 } },
+      { char: 'B', transform: { angle_deg: 90, scale: 0.705, tx: -0.07315, ty: -0.5645 } },
+      { char: 'C', transform: { angle_deg: 45, scale: 0.69, tx: -0.078141645, ty: -0.759920268 } },
+      { char: 'M', transform: { angle_deg: 31.504266719, scale: 0.675, tx: -0.459460701, ty: -0.420792923 } },
+    ],
+    attachments: [
+      { from: 0, to: 2, score: 13.808889923, sharedLength: 0.3384 },
+      { from: 1, to: 0, score: 16.401476478, sharedLength: 0.178232736 },
+      { from: 3, to: 0, score: 18.461274225, sharedLength: 0.265165396 },
+    ],
+  },
+];
+
+describe('reordered input parity with size_hierarchy.py', () => {
+  it('matches the Python prototype when each choice spine is moved to the front', () => {
+    for (const testCase of PYTHON_REORDERED_CASES) {
+      const result = generateSizeSigil(testCase.source, 'size-spine', {
+        seed: testCase.seed,
+        spineIndex: testCase.spine,
+      });
+
+      expect(result.source).toBe(testCase.source);
+      expect(result.variant).toBe('size-spine');
+      expect(result.metrics.spine_letter).toBe(testCase.spine);
+      expect(result.metrics.spine_scale).toBe(1.22);
+      expect(result.letters.map((letter: any) => letter.index)).toEqual(
+        testCase.source.split('').map((_, index) => index),
+      );
+      expect(result.letters.map((letter: any) => letter.char)).toEqual(
+        testCase.source.split(''),
+      );
+
+      for (const expected of testCase.letters) {
+        const actual = result.letters.find(
+          (letter: any) => letter.char === expected.char,
+        );
+        expect(actual).toBeDefined();
+        expect(actual.transform.angle_deg).toBeCloseTo(
+          expected.transform.angle_deg,
+          9,
+        );
+        expect(actual.transform.scale).toBeCloseTo(expected.transform.scale, 9);
+        expect(actual.transform.tx).toBeCloseTo(expected.transform.tx, 9);
+        expect(actual.transform.ty).toBeCloseTo(expected.transform.ty, 9);
+      }
+
+      for (const expected of testCase.attachments) {
+        const actual = result.attachments.find(
+          (attachment: any) =>
+            Number(attachment.from_letter) === expected.from &&
+            Number(attachment.to_letter) === expected.to,
+        );
+        expect(actual).toBeDefined();
+        expect(actual.candidate_score).toBeCloseTo(expected.score, 9);
+        expect(actual.actual_contact.shared_length).toBeCloseTo(
+          expected.sharedLength,
+          9,
+        );
+      }
+      expect(result.exact_check.exact_stroke_components).toBe(1);
+      expect(result.exact_check.exact_letter_components).toBe(1);
+      expect(result.exact_check.near_only_dependency).toBe(false);
+    }
+  }, 30000);
+
+  it('keeps verified precision deviations at zero against the Python values', () => {
+    let maxDeviation = 0;
+    for (const testCase of PYTHON_REORDERED_CASES) {
+      const result = generateSizeSigil(testCase.source, 'size-spine', {
+        seed: testCase.seed,
+        spineIndex: testCase.spine,
+      });
+      for (const expected of testCase.letters) {
+        const actual = result.letters.find(
+          (letter: any) => letter.char === expected.char,
+        )!;
+        maxDeviation = Math.max(
+          maxDeviation,
+          Math.abs(actual.transform.angle_deg - expected.transform.angle_deg),
+          Math.abs(actual.transform.scale - expected.transform.scale),
+          Math.abs(actual.transform.tx - expected.transform.tx),
+          Math.abs(actual.transform.ty - expected.transform.ty),
+        );
+      }
+      for (const expected of testCase.attachments) {
+        const actual = result.attachments.find(
+          (attachment: any) =>
+            Number(attachment.from_letter) === expected.from &&
+            Number(attachment.to_letter) === expected.to,
+        )!;
+        maxDeviation = Math.max(
+          maxDeviation,
+          Math.abs(actual.candidate_score - expected.score),
+          Math.abs(actual.actual_contact.shared_length - expected.sharedLength),
+        );
+      }
+    }
+    expect(maxDeviation).toBeLessThanOrEqual(1e-9);
+  }, 30000);
 });

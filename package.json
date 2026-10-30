@@ -1,7 +1,7 @@
 {
   "name": "lunarz-sigilizer",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Deterministic intention-to-sigil composition engine with a local Tauri shell.",
   "license": "MIT",
@@ -9,7 +9,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"

@@ -638,7 +638,9 @@ body {
 .sigilpath {
   fill: none;
   stroke: var(--color-sigil-stroke);
-  stroke-width: 4;
+  /* No stroke-width here: the per-letter stroke-width presentation attribute
+     carries the scale-compensated width (4 / |scale|). Any CSS stroke-width
+     would override that attribute and render as CSS-value * |scale|. */
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -665,7 +667,9 @@ body {
 
 .sigilpath.is-lit {
   stroke: var(--color-focus);
-  stroke-width: 6;
+  /* No stroke-width here either: the lit path's wider width (effective 6)
+     is carried by its own scale-compensated stroke-width attribute
+     (6 / |scale|) set in App.tsx. A fixed CSS value would override it. */
 }
 
 .sigilpath.is-dim {
@@ -688,6 +692,171 @@ body {
   fill: var(--color-focus);
   text-anchor: middle;
   dominant-baseline: central;
+}
+
+.wheelchoice {
+  margin: var(--space-sm) 0 var(--space-md);
+  border: 1px solid var(--color-rule-soft);
+  border-radius: 12px;
+  padding: var(--space-sm);
+  min-width: 0;
+}
+
+.wheelchoice__legend {
+  padding: 0 var(--space-2xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-neutral);
+}
+
+.wheelchoice__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.wheelchoice__option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: 44px;
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-rule-soft);
+  border-radius: 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.wheelchoice__option:has(input:checked) {
+  border-color: var(--color-accent);
+  background: var(--color-paper-3);
+}
+
+.wheelchoice__option input {
+  accent-color: var(--color-accent);
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
+
+.wheelchoice__option span {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.wheelchoice__option strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-ink);
+  white-space: nowrap;
+}
+
+.wheelchoice__option small {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-neutral);
+  white-space: nowrap;
+}
+
+.wheel-ring {
+  stroke: var(--color-rule);
+  stroke-width: 1;
+  opacity: 0.85;
+}
+
+.wheel-point {
+  fill: var(--color-neutral);
+  opacity: 0.65;
+}
+
+.wheel-point.is-used {
+  fill: var(--color-accent);
+  opacity: 1;
+}
+
+.wheel-point.is-highlighted {
+  fill: var(--color-focus);
+  opacity: 1;
+}
+
+.wheel-label {
+  fill: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.wheel-label.is-used {
+  fill: var(--color-accent);
+  font-weight: 700;
+}
+
+.wheel-label.is-highlighted {
+  fill: var(--color-focus);
+  font-weight: 700;
+}
+
+.wheel-order {
+  fill: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.wheel-order.is-highlighted {
+  fill: var(--color-focus);
+}
+
+.wheel-dot {
+  fill: var(--color-sigil-stroke);
+  /* Fill-only mark like the export circle: no stroke. Without this, the
+     removed `sigilpath` coupling (or any future re-add) paints a default
+     1px outline in preview that the SVG/PNG export never has. */
+  stroke: none;
+}
+
+.wheelmark {
+  animation: draw-in var(--dur-long) var(--ease-out) both;
+}
+
+.sequences {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  list-style: none;
+  margin: var(--space-sm) 0 0;
+  padding: 0;
+}
+
+.sequences__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-height: 44px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--color-rule);
+  border-radius: 10px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.sequences__item.is-lit {
+  border-color: var(--color-focus);
+  color: var(--color-focus);
+}
+
+.sequences__order {
+  color: var(--color-accent);
+  font-weight: 700;
+}
+
+.sequences__item.is-lit .sequences__order {
+  color: var(--color-focus);
 }
 
 .preview {
