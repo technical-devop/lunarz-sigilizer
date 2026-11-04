@@ -59,7 +59,8 @@ describe('one deterministic wheel mark', () => {
     expect(screen.queryByRole('group', { name: 'Choose an arrangement' })).toBeNull();
     expect(screen.queryByText(/Three small arrangements/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /Regenerate/i })).toBeNull();
-    expect(screen.getByRole('heading', { name: /One quiet mark/i })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Sigil preview' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'One quiet mark' })).toBeNull();
     expect(screen.getByRole('img', { name: /Sigil mark from 4 letters/i })).toBeInTheDocument();
     expect(container.querySelectorAll('.preview__stage path.sigilpath')).toHaveLength(1);
   });

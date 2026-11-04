@@ -143,6 +143,41 @@ describe('wheel motion', () => {
 });
 
 describe('accessibility', () => {
+  it('uses the requested headings and help copy, without the removed copy', () => {
+    render(<App />);
+
+    expect(
+      screen.getByRole('heading', { name: 'Name your intention' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('What is your intention?')).toBeNull();
+
+    expect(
+      screen.getByText(
+        'One sentence is enough, the more specific the better. Letters, spaces and punctuation are all welcome.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        'One sentence is enough. Letters, spaces and punctuation are all welcome.',
+      ),
+    ).toBeNull();
+
+    expect(
+      screen.getByRole('heading', { name: 'Your intention, your mark' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Release, in three passes')).toBeNull();
+
+    expect(screen.queryByText(/Everything you typed/)).toBeNull();
+    expect(screen.queryByText(/Vowels rest/)).toBeNull();
+    expect(screen.queryByText(/Repeats rest/)).toBeNull();
+    expect(screen.queryByText(/What remains/)).toBeNull();
+
+    expect(screen.queryByRole('heading', { name: 'One quiet mark' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Sigil preview' })).toBeInTheDocument();
+
+    expect(screen.getByText('Pass 1 of 4')).toBeInTheDocument();
+  });
+
   it('has no focusable SVG paths in the preview; highlight uses independent chips', async () => {
     const { container } = render(<App />);
     const user = userEvent.setup();

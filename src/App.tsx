@@ -34,13 +34,6 @@ const WORKER_UNAVAILABLE_MESSAGE =
 const WORKER_FAILURE_MESSAGE =
   'The background composer stopped unexpectedly. Reload the app, or use a browser with Web Workers enabled, then try again.';
 
-const STAGE_COPY = [
-  'Everything you typed, as arrived.',
-  'Vowels rest. They softened the word; they do not build the mark.',
-  'Repeats rest. What remains has already been said once.',
-  'What remains. These letters build the mark.',
-] as const;
-
 function reasonLabel(reason: string): string {
   switch (reason) {
     case 'whitespace':
@@ -673,7 +666,7 @@ export default function App(): React.JSX.Element {
       <main id="main" className="ritual__bench">
         <div className="bench__col console">
           <section className="card panel" aria-labelledby="intention-heading">
-            <h2 id="intention-heading">What is your intention?</h2>
+            <h2 id="intention-heading">Name your intention</h2>
             <p>
               Write it plainly. Only consonants build the mark; nothing leaves this device.
             </p>
@@ -709,7 +702,8 @@ export default function App(): React.JSX.Element {
                 </button>
               </div>
               <p id="intention-help" className="field__help">
-                One sentence is enough. Letters, spaces and punctuation are all welcome.
+                One sentence is enough, the more specific the better. Letters, spaces and
+                punctuation are all welcome.
               </p>
               <p id="intention-status" className="field__error" role="status">
                 {committed !== null && emptyKind === 'empty'
@@ -741,12 +735,11 @@ export default function App(): React.JSX.Element {
 
           <section className="card panel" aria-labelledby="release-heading" aria-live="polite">
             <div className="stagehead">
-              <h2 id="release-heading">Release, in three passes</h2>
+              <h2 id="release-heading">Your intention, your mark</h2>
               <span className="stagehead__status">
                 Pass {Math.min(stage + 1, 4)} of 4
               </span>
             </div>
-            <p>{STAGE_COPY[stage] ?? STAGE_COPY[0]}</p>
 
             {!intention || intention.characters.length === 0 ? (
               <div className="empty">
@@ -871,8 +864,7 @@ export default function App(): React.JSX.Element {
         </div>
 
         <div className="bench__col stagecol">
-          <section className="card stage" aria-labelledby="compose-heading">
-            <h2 id="compose-heading">One quiet mark</h2>
+          <section className="card stage" aria-label="Sigil preview">
             <p>
               The kept letters, set once around the wheel. Three rings by default; a
               single ring reads more plainly.
