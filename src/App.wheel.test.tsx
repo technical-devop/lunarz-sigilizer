@@ -192,6 +192,7 @@ describe('safe exports on the wheel', () => {
           stop.getAttribute('stop-color'),
         ),
       ).toEqual([SIGIL_GLOW, SIGIL_BACKGROUND]);
+      expect([SIGIL_GLOW, SIGIL_BACKGROUND]).toEqual(['#000000', '#000000']);
 
       blobs.length = 0;
       downloads.length = 0;
@@ -250,11 +251,14 @@ describe('safe exports on the wheel', () => {
         }
       },
     );
-    const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    const pngContext = {
       fillStyle: '',
       fillRect: vi.fn(),
       drawImage: vi.fn(),
-    } as unknown as CanvasRenderingContext2D);
+    } as unknown as CanvasRenderingContext2D;
+    const getContextSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(pngContext);
     const toBlobSpy = vi
       .spyOn(HTMLCanvasElement.prototype, 'toBlob')
       .mockImplementation(function (this: HTMLCanvasElement, callback: (blob: Blob | null) => void) {
@@ -276,6 +280,7 @@ describe('safe exports on the wheel', () => {
       expect(raster).not.toContain('data-seed');
       expect(raster).toContain(`stroke="${SIGIL_STROKE}"`);
       expect(raster).toContain(`d="${previewD}"`);
+      expect(pngContext.fillStyle).toBe('#000000');
     } finally {
       clickSpy.mockRestore();
       getContextSpy.mockRestore();

@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 
+import lunarzLogo from './assets/lunarz-logo.svg';
 import { processIntention } from './core/intention';
 import {
   SIGIL_BACKGROUND,
@@ -20,6 +21,11 @@ import {
 import { wheelToExportSvg } from './core/wheelSvg';
 
 type Phase = 'intend' | 'reduce' | 'compose';
+
+export const RELEASE_STAGE_MS = 1000;
+export const SIGIL_DRAW_MS = 800;
+
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 const NO_LAYOUT_MESSAGE =
   'These letters could not settle into a clear mark. Begin again with different words.';
@@ -132,16 +138,52 @@ function orderPosition(
   };
 }
 
+function SteppedStageFrame(): React.JSX.Element {
+  return (
+    <svg
+      className="stageframe"
+      viewBox="0 0 1200 560"
+      preserveAspectRatio="none"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        className="stageframe__rail stageframe__rail--outer"
+        d="M 76 8 L 1124 8 L 1124 40 L 1166 40 L 1166 104 L 1186 104 L 1186 164 L 1166 164 L 1166 396 L 1186 396 L 1186 456 L 1166 456 L 1166 520 L 1124 520 L 1124 552 L 1044 552 L 1044 534 L 156 534 L 156 552 L 76 552 L 76 520 L 34 520 L 34 456 L 14 456 L 14 396 L 34 396 L 34 164 L 14 164 L 14 104 L 34 104 L 34 40 L 76 40 Z"
+      />
+      <path
+        className="stageframe__rail stageframe__rail--inner"
+        d="M 94 27 L 1106 27 L 1106 59 L 1147 59 L 1147 119 L 1167 119 L 1167 149 L 1147 149 L 1147 411 L 1167 411 L 1167 441 L 1147 441 L 1147 504 L 1106 504 L 1106 533 L 1026 533 L 1026 515 L 174 515 L 174 533 L 94 533 L 94 504 L 53 504 L 53 441 L 33 441 L 33 411 L 53 411 L 53 149 L 33 149 L 33 119 L 53 119 L 53 59 L 94 59 Z"
+      />
+    </svg>
+  );
+}
+
+function StageEmpty({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return (
+    <div className="preview__frame">
+      <SteppedStageFrame />
+      <div className="preview__stage preview__stage--empty">
+        <div className="empty">{children}</div>
+      </div>
+      <span className="preview__chk preview__chk--l" aria-hidden="true" />
+      <span className="preview__chk preview__chk--r" aria-hidden="true" />
+    </div>
+  );
+}
+
 function WheelSvg({
   sigil,
   showWheel,
   showSequence,
   highlighted,
+  drawing,
 }: {
   sigil: WheelSigil;
   showWheel: boolean;
   showSequence: boolean;
   highlighted: string | null;
+  drawing: boolean;
 }): React.JSX.Element {
   const rawId = useId();
   const gradientId = `sigil-night-${rawId.replaceAll(/[^A-Za-z0-9_-]/g, '')}`;
@@ -199,7 +241,7 @@ function WheelSvg({
 
       {sigil.dot ? (
         <circle
-          className="wheel-dot"
+          className={`wheel-dot${drawing ? ' is-drawing' : ''}`}
           cx={sigil.dot.x}
           cy={sigil.dot.y}
           r={sigil.dot.radius}
@@ -210,8 +252,9 @@ function WheelSvg({
         />
       ) : sigil.pathD ? (
         <path
-          className="sigilpath wheelmark"
+          className={`sigilpath wheelmark${drawing ? ' is-drawing' : ''}`}
           d={sigil.pathD}
+          pathLength={1}
           fill="none"
           stroke={SIGIL_STROKE}
           strokeWidth={SIGIL_STROKE_WIDTH}
@@ -279,11 +322,39 @@ function WheelSvg({
   );
 }
 
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return false;
+    }
+    return window.matchMedia(REDUCED_MOTION_QUERY).matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const query = window.matchMedia(REDUCED_MOTION_QUERY);
+    const update = (event: MediaQueryListEvent): void => setReduced(event.matches);
+    setReduced(query.matches);
+    if (typeof query.addEventListener !== 'function') {
+      return;
+    }
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+
+  return reduced;
+}
+
 export default function App(): React.JSX.Element {
   const [draft, setDraft] = useState('');
   const [committed, setCommitted] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>('intend');
   const [stage, setStage] = useState(0);
+  const [settled, setSettled] = useState(false);
+  const [runToken, setRunToken] = useState(0);
+  const prefersReducedMotion = usePrefersReducedMotion();
   const [wheelMode, setWheelMode] = useState<WheelMode>('multi');
   const [showWheel, setShowWheel] = useState(false);
   const [showSequence, setShowSequence] = useState(false);
@@ -296,6 +367,39 @@ export default function App(): React.JSX.Element {
     sigil: WheelSigil | null;
     error: string | null;
   } | null>(null);
+
+  useEffect(() => {
+    if (phase === 'intend' || settled) {
+      return;
+    }
+
+    if (prefersReducedMotion) {
+      setStage(3);
+      setPhase('compose');
+      setSettled(true);
+      return;
+    }
+
+    if (phase === 'reduce') {
+      const timer = window.setTimeout(() => {
+        if (stage < 3) {
+          const next = stage + 1;
+          setStage(next);
+          if (next === 3) {
+            setPhase('compose');
+          }
+        } else {
+          setPhase('compose');
+        }
+      }, RELEASE_STAGE_MS);
+      return () => window.clearTimeout(timer);
+    }
+
+    const timer = window.setTimeout(() => {
+      setSettled(true);
+    }, SIGIL_DRAW_MS);
+    return () => window.clearTimeout(timer);
+  }, [phase, stage, settled, prefersReducedMotion, runToken]);
 
   const intention = useMemo(
     () => (committed === null ? null : processIntention(committed)),
@@ -373,13 +477,14 @@ export default function App(): React.JSX.Element {
       cancelled = true;
       worker?.terminate();
     };
-  }, [intention, wheelKey, wheelMode]);
+  }, [intention, wheelKey, wheelMode, runToken]);
 
   const pendingBatch = pending && pending.key === wheelKey ? pending : null;
   const active = pendingBatch?.sigil ?? null;
   const compositionError = pendingBatch?.error ?? null;
   const hasLetters = (intention?.letters.length ?? 0) > 0;
   const inCompose = phase === 'compose';
+  const isDrawing = inCompose && !settled && !prefersReducedMotion;
   const isPreparing =
     inCompose && hasLetters && active === null && compositionError === null;
   const isDirty = committed !== null && draft !== committed;
@@ -401,13 +506,11 @@ export default function App(): React.JSX.Element {
     (entry) => entry.reason !== 'whitespace' && entry.reason !== 'punctuation',
   );
 
-  function begin(): void {
-    if (draft.trim().length === 0) {
-      return;
-    }
-    setCommitted(draft);
-    setPhase('reduce');
-    setStage(0);
+  function restartSequence(): void {
+    setRunToken((token) => token + 1);
+    setStage(prefersReducedMotion ? 3 : 0);
+    setPhase(prefersReducedMotion ? 'compose' : 'reduce');
+    setSettled(prefersReducedMotion);
     setHovered(null);
     setPinned(null);
     setExportNote('');
@@ -415,34 +518,33 @@ export default function App(): React.JSX.Element {
     setShowSequence(false);
   }
 
-  function continueStage(): void {
-    if (stage < 3) {
-      const next = stage + 1;
-      setStage(next);
-      if (next === 3) {
-        setPhase('compose');
-      }
-    } else {
-      setPhase('compose');
+  function begin(): void {
+    if (draft.trim().length === 0) {
+      return;
     }
+    setCommitted(draft);
+    restartSequence();
   }
 
   function replay(): void {
-    setStage(0);
-    setPhase('reduce');
-    setHovered(null);
-    setPinned(null);
+    restartSequence();
   }
 
   function skip(): void {
     setStage(3);
     setPhase('compose');
+    setSettled(true);
+    setHovered(null);
+    setPinned(null);
+    setExportNote('');
   }
 
   function startOver(): void {
     setCommitted(null);
+    setRunToken((token) => token + 1);
     setPhase('intend');
     setStage(0);
+    setSettled(false);
     setHovered(null);
     setPinned(null);
     setExportNote('');
@@ -542,31 +644,38 @@ export default function App(): React.JSX.Element {
       </a>
 
       <header className="ritual__top">
-        <h1 className="wordmark">
-          Lunarz Sigilizer
-          <small>A quiet bench for one intention</small>
-        </h1>
+        <div className="brand">
+          <img
+            className="brand__mark"
+            src={lunarzLogo}
+            alt="Lunarz"
+            width={2048}
+            height={1117}
+          />
+          <div className="brand__text">
+            <h1 className="brand__name">Sigilizer</h1>
+            <p className="brand__note">one intention, one mark</p>
+          </div>
+        </div>
         <ol className="phases" aria-label="Ritual phases">
-          <li aria-current={phase === 'intend' ? 'step' : undefined}>1 · Intend</li>
-          <li aria-current={phase === 'reduce' ? 'step' : undefined}>2 · Release</li>
-          <li aria-current={phase === 'compose' ? 'step' : undefined}>3 · Compose</li>
+          <li aria-current={phase === 'intend' ? 'step' : undefined}>
+            <span className="phases__num">1</span> Intend
+          </li>
+          <li aria-current={phase === 'reduce' ? 'step' : undefined}>
+            <span className="phases__num">2</span> Release
+          </li>
+          <li aria-current={phase === 'compose' ? 'step' : undefined}>
+            <span className="phases__num">3</span> Compose
+          </li>
         </ol>
       </header>
 
-      <div className="ritual__sky" aria-hidden="true">
-        <pre className="moon">
-          {`        .      ·       ·           ·\n   ·        ·                  ·\n ·              .-""-.              ·\n   ·           / .--. \\      ·\n  ·    ·      | (    ) |          ·\n              \\ '--' /     ·\n        ·      '-...-'              ·\n   ·                ·       ·           ·`}
-        </pre>
-      </div>
-
       <main id="main" className="ritual__bench">
-        <div className="bench__col">
-          <section className="card" aria-labelledby="intention-heading">
-            <p className="card__kicker">First movement</p>
+        <div className="bench__col console">
+          <section className="card panel" aria-labelledby="intention-heading">
             <h2 id="intention-heading">What is your intention?</h2>
             <p>
-              Write it plainly, in your own words. Nothing leaves this device. Spaces rest
-              quietly aside; only consonants go on to build the mark.
+              Write it plainly. Only consonants build the mark; nothing leaves this device.
             </p>
             <div className="field">
               <label className="field__label" htmlFor="intention-input">
@@ -630,8 +739,7 @@ export default function App(): React.JSX.Element {
             </div>
           </section>
 
-          <section className="card" aria-labelledby="release-heading" aria-live="polite">
-            <p className="card__kicker">Second movement</p>
+          <section className="card panel" aria-labelledby="release-heading" aria-live="polite">
             <div className="stagehead">
               <h2 id="release-heading">Release, in three passes</h2>
               <span className="stagehead__status">
@@ -648,7 +756,13 @@ export default function App(): React.JSX.Element {
               </div>
             ) : (
               <>
-                <div className="tokenstream" data-stage={stage} role="list" aria-label="Letter reduction">
+                <div
+                  className="tokenstream"
+                  data-stage={stage}
+                  data-settled={settled ? 'true' : 'false'}
+                  role="list"
+                  aria-label="Letter reduction"
+                >
                   {intention.characters.map((character) => {
                     const key = `${character.index}-${character.char}`;
                     if (character.classification === 'kept') {
@@ -740,34 +854,28 @@ export default function App(): React.JSX.Element {
                   </div>
                 ) : null}
 
-                <div className="btnrow" role="group" aria-label="Pacing controls">
-                  <button type="button" className="btn" onClick={replay}>
-                    Replay
-                  </button>
-                  <button type="button" className="btn" onClick={skip}>
-                    Skip
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn--primary"
-                    onClick={continueStage}
-                    disabled={!hasLetters}
-                  >
-                    {stage >= 3 ? 'Gather the kept letters' : 'Continue'}
-                  </button>
+                <div className="btnrow" role="group" aria-label="Playback controls">
+                  {settled ? (
+                    <button type="button" className="btn" onClick={replay}>
+                      Replay
+                    </button>
+                  ) : (
+                    <button type="button" className="btn" onClick={skip}>
+                      Skip
+                    </button>
+                  )}
                 </div>
               </>
             )}
           </section>
         </div>
 
-        <div className="bench__col">
-          <section className="card" aria-labelledby="compose-heading">
-            <p className="card__kicker">Third movement</p>
+        <div className="bench__col stagecol">
+          <section className="card stage" aria-labelledby="compose-heading">
             <h2 id="compose-heading">One quiet mark</h2>
             <p>
-              The same kept letters, set once around the wheel. The three-ring wheel is
-              the default; choose the single ring if that reads more plainly.
+              The kept letters, set once around the wheel. Three rings by default; a
+              single ring reads more plainly.
             </p>
 
             <fieldset className="wheelchoice">
@@ -803,34 +911,35 @@ export default function App(): React.JSX.Element {
             </fieldset>
 
             {!hasLetters ? (
-              <div className="empty">
-                <p style={{ margin: 0 }}>
+              <StageEmpty>
+                <p>
                   {emptyKind === 'all-vowel'
                     ? 'Vowels alone cannot build. Add a consonant above and the mark will appear here.'
                     : emptyKind === 'unsupported-only'
                       ? 'Nothing here could enter the mark. Letters A–Z build; the rest are held aside with care.'
                       : 'Your wheel mark will appear here once your kept letters gather.'}
                 </p>
-              </div>
-            ) : !inCompose ? (
-              <div className="empty">
-                <p style={{ margin: 0 }}>
-                  Reduction first. Continue through the passes, or Skip, and the wheel mark
-                  will gather here. Nothing is built yet.
-                </p>
-              </div>
+              </StageEmpty>
             ) : compositionError ? (
-              <div className="empty">
-                <p className="field__error" role="alert" style={{ margin: 0 }}>
+              <StageEmpty>
+                <p className="field__error" role="alert">
                   {compositionError}
                 </p>
-              </div>
-            ) : isPreparing || !active ? (
-              <div className="empty">
-                <p style={{ margin: 0 }}>
-                  The wheel mark will appear here once your kept letters gather.
+              </StageEmpty>
+            ) : !inCompose ? (
+              <StageEmpty>
+                <p>
+                  Reduction first. The sequence plays on its own; Skip settles the mark
+                  immediately. Nothing is built yet.
                 </p>
-              </div>
+              </StageEmpty>
+            ) : isPreparing || !active ? (
+              <StageEmpty>
+                <p>
+                  The composer is still working. The wheel mark will appear here once your
+                  kept letters gather.
+                </p>
+              </StageEmpty>
             ) : (
               <div className="preview">
                 <div className="stagehead">
@@ -841,93 +950,123 @@ export default function App(): React.JSX.Element {
                     {active.letters.length} {active.letters.length === 1 ? 'letter' : 'letters'}
                   </span>
                 </div>
-                <div className="preview__stage">
-                  <WheelSvg
-                    sigil={active}
-                    showWheel={showWheel}
-                    showSequence={showSequence}
-                    highlighted={highlighted}
-                  />
+                <div className="preview__frame">
+                  <SteppedStageFrame />
+                  <div className="preview__stage">
+                    <WheelSvg
+                      sigil={active}
+                      showWheel={showWheel}
+                      showSequence={showSequence}
+                      highlighted={highlighted}
+                      drawing={isDrawing}
+                    />
+                  </div>
+                  <span className="preview__chk preview__chk--l" aria-hidden="true" />
+                  <span className="preview__chk preview__chk--r" aria-hidden="true" />
                 </div>
 
-                <div className="btnrow" role="group" aria-label="Inspection">
-                  <button
-                    type="button"
-                    className="btn btn--quiet"
-                    aria-pressed={showWheel}
-                    onClick={() => setShowWheel((value) => !value)}
-                  >
-                    Show wheel
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn--quiet"
-                    aria-pressed={showSequence}
-                    onClick={() => setShowSequence((value) => !value)}
-                  >
-                    Show sequence
-                  </button>
-                </div>
-
-                {showSequence ? (
-                  <ol className="sequences" aria-label="Wheel sequence">
-                    {active.sequence.map((entry) => (
-                      <li key={`${entry.letter}-${entry.sourceIndex}`}>
+                {settled ? (
+                  <>
+                    <div className="preview__actions">
+                      <div className="btnrow" role="group" aria-label="Inspection">
                         <button
                           type="button"
-                          className={`sequences__item${highlighted === entry.letter ? ' is-lit' : ''}`}
+                          className="btn btn--quiet"
+                          aria-pressed={showWheel}
+                          onClick={() => setShowWheel((value) => !value)}
+                        >
+                          Show wheel
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--quiet"
+                          aria-pressed={showSequence}
+                          onClick={() => setShowSequence((value) => !value)}
+                        >
+                          Show sequence
+                        </button>
+                      </div>
+                      <div
+                        className="btnrow btnrow--export"
+                        role="group"
+                        aria-label="Export the chosen sigil"
+                      >
+                        <button
+                          type="button"
+                          className="btn btn--primary"
+                          onClick={exportSvg}
+                          aria-describedby="overlay-note"
+                        >
+                          Save SVG
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={exportPng}
+                          aria-describedby="overlay-note"
+                        >
+                          Save PNG
+                        </button>
+                      </div>
+                    </div>
+
+                    {showSequence ? (
+                      <ol className="sequences" aria-label="Wheel sequence">
+                        {active.sequence.map((entry) => (
+                          <li key={`${entry.letter}-${entry.sourceIndex}`}>
+                            <button
+                              type="button"
+                              className={`sequences__item${highlighted === entry.letter ? ' is-lit' : ''}`}
+                              aria-pressed={highlighted === entry.letter}
+                              aria-label={`Letter ${entry.letter}, position ${entry.order}`}
+                              onMouseEnter={() => previewHighlight(entry.letter)}
+                              onMouseLeave={() => previewHighlight(null)}
+                              onFocus={() => previewHighlight(entry.letter)}
+                              onBlur={() => previewHighlight(null)}
+                              onClick={() => toggleHighlight(entry.letter)}
+                            >
+                              <span className="sequences__order">{entry.order}</span>{' '}
+                              {entry.letter}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : null}
+
+                    <div
+                      className="letters"
+                      role="group"
+                      aria-label="Highlight a source letter"
+                    >
+                      {active.sequence.map((entry) => (
+                        <button
+                          key={entry.sourceIndex}
+                          type="button"
+                          className={`chip chip--action${highlighted === entry.letter ? ' is-lit' : ''}`}
                           aria-pressed={highlighted === entry.letter}
-                          aria-label={`Letter ${entry.letter}, position ${entry.order}`}
+                          aria-label={`Highlight letter ${entry.letter}`}
                           onMouseEnter={() => previewHighlight(entry.letter)}
                           onMouseLeave={() => previewHighlight(null)}
                           onFocus={() => previewHighlight(entry.letter)}
                           onBlur={() => previewHighlight(null)}
                           onClick={() => toggleHighlight(entry.letter)}
                         >
-                          <span className="sequences__order">{entry.order}</span> {entry.letter}
+                          {entry.letter}
                         </button>
-                      </li>
-                    ))}
-                  </ol>
+                      ))}
+                    </div>
+
+                    <p className="field__help" id="overlay-note">
+                      Wheel and sequence overlays are inspection only — exports contain
+                      clean lines on the night background, with no labels, order, or
+                      highlights.
+                    </p>
+                    <p className="field__help" role="status" aria-live="polite">
+                      {exportNote ||
+                        'Exports match the chosen preview exactly — same lines, same night. Overlays are never exported.'}
+                    </p>
+                  </>
                 ) : null}
-
-                <div className="letters" role="group" aria-label="Highlight a source letter">
-                  {active.sequence.map((entry) => (
-                    <button
-                      key={entry.sourceIndex}
-                      type="button"
-                      className={`chip chip--action${highlighted === entry.letter ? ' is-lit' : ''}`}
-                      aria-pressed={highlighted === entry.letter}
-                      aria-label={`Highlight letter ${entry.letter}`}
-                      onMouseEnter={() => previewHighlight(entry.letter)}
-                      onMouseLeave={() => previewHighlight(null)}
-                      onFocus={() => previewHighlight(entry.letter)}
-                      onBlur={() => previewHighlight(null)}
-                      onClick={() => toggleHighlight(entry.letter)}
-                    >
-                      {entry.letter}
-                    </button>
-                  ))}
-                </div>
-
-                <p className="field__help" id="overlay-note">
-                  Wheel and sequence overlays are inspection only — exports contain clean
-                  lines on the night background, with no labels, order, or highlights.
-                </p>
-                <p className="quiet" role="status">
-                  This one is yours, if you want it. Keep it somewhere quiet.
-                </p>
-                <div className="btnrow" role="group" aria-label="Export the chosen sigil">
-                  <button type="button" className="btn btn--primary" onClick={exportSvg} aria-describedby="overlay-note">
-                    Save SVG
-                  </button>
-                  <button type="button" className="btn" onClick={exportPng} aria-describedby="overlay-note">
-                    Save PNG
-                  </button>
-                </div>
-                <p className="field__help" role="status" aria-live="polite">
-                  {exportNote || 'Exports match the chosen preview exactly — same lines, same night. Overlays are never exported.'}
-                </p>
               </div>
             )}
           </section>

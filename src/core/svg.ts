@@ -4,8 +4,8 @@ import type { SigilComposition } from './compose';
 export const SIGIL_STROKE = '#D9E6F5';
 export const SIGIL_STROKE_WIDTH = 4;
 export const SIGIL_STROKE_HIGHLIGHT_WIDTH = 6;
-export const SIGIL_BACKGROUND = '#151B28';
-export const SIGIL_GLOW = '#2C3A56';
+export const SIGIL_BACKGROUND = '#000000';
+export const SIGIL_GLOW = '#000000';
 export const SIGIL_GRADIENT_ID = 'sigil-night';
 
 /**

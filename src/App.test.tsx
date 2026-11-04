@@ -2,11 +2,16 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import App, { buildExportSvg, exportFileName } from './App';
+import App, {
+  RELEASE_STAGE_MS,
+  SIGIL_DRAW_MS,
+  buildExportSvg,
+  exportFileName,
+} from './App';
 import { FakeWorker } from './test/fakeWorker';
 import { composeWheelSigil, processIntention } from './core';
 import { SIGIL_STROKE, SIGIL_STROKE_WIDTH } from './core/svg';
@@ -24,48 +29,65 @@ afterEach(() => {
 });
 
 describe('ritual phases', () => {
-  it('hides the wheel mark and exports until compose after begin', async () => {
-    render(<App />);
-    const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Your intention'), 'sleep through the night');
-    await user.click(screen.getByRole('button', { name: 'Begin the reduction' }));
+  it('hides the wheel mark and exports until the automatic sequence settles', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.type(screen.getByLabelText('Your intention'), 'sleep through the night');
+      await user.click(screen.getByRole('button', { name: 'Begin the reduction' }));
 
-    expect(screen.queryByRole('img', { name: /Sigil mark from/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Save SVG/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Save PNG/ })).toBeNull();
-    expect(
-      screen.getByText(/Reduction first\. Continue through the passes/i),
-    ).toBeInTheDocument();
+      expect(screen.queryByRole('img', { name: /Sigil mark from/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /Save SVG/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /Save PNG/ })).toBeNull();
+      expect(
+        screen.getByText(/Reduction first\. The sequence plays on its own/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.queryByRole('img', { name: /Sigil mark from/ })).toBeNull();
+      act(() => vi.advanceTimersByTime(RELEASE_STAGE_MS));
+      expect(screen.queryByRole('img', { name: /Sigil mark from/ })).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.queryByRole('img', { name: /Sigil mark from/ })).toBeNull();
+      act(() => vi.advanceTimersByTime(RELEASE_STAGE_MS));
+      expect(screen.queryByRole('img', { name: /Sigil mark from/ })).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.getByRole('img', { name: /Sigil mark from/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Save SVG/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Save PNG/ })).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(RELEASE_STAGE_MS));
+      expect(screen.getByRole('img', { name: /Sigil mark from/ })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Save SVG/ })).toBeNull();
+
+      act(() => vi.advanceTimersByTime(SIGIL_DRAW_MS));
+      expect(screen.getByRole('button', { name: /Save SVG/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Save PNG/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Replay' })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   }, 15000);
 
-  it('steps stages in order: vowels fade only after first Continue, duplicates after next', async () => {
-    render(<App />);
-    const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Your intention'), 'banana sleep');
-    await user.click(screen.getByRole('button', { name: 'Begin the reduction' }));
+  it('steps stages automatically in order without Continue', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.type(screen.getByLabelText('Your intention'), 'banana sleep');
+      await user.click(screen.getByRole('button', { name: 'Begin the reduction' }));
 
-    const stream = screen.getByRole('list', { name: 'Letter reduction' });
-    expect(stream).toHaveAttribute('data-stage', '0');
+      const stream = screen.getByRole('list', { name: 'Letter reduction' });
+      expect(stream).toHaveAttribute('data-stage', '0');
+      expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(stream).toHaveAttribute('data-stage', '1');
+      act(() => vi.advanceTimersByTime(RELEASE_STAGE_MS));
+      expect(stream).toHaveAttribute('data-stage', '1');
 
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(stream).toHaveAttribute('data-stage', '2');
+      act(() => vi.advanceTimersByTime(RELEASE_STAGE_MS));
+      expect(stream).toHaveAttribute('data-stage', '2');
 
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(stream).toHaveAttribute('data-stage', '3');
+      act(() => vi.advanceTimersByTime(RELEASE_STAGE_MS));
+      expect(stream).toHaveAttribute('data-stage', '3');
+      expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('gathers one wheel mark for longer intentions without blocking the bench', async () => {
@@ -102,11 +124,21 @@ describe('wheel motion', () => {
   it('animates the single wheel path in and keeps a reduced-motion fallback', () => {
     const ritualCss = readFileSync(join(here, 'ritual.css'), 'utf8');
     expect(ritualCss).toContain('.wheelmark');
+    const baseMotion = ritualCss.slice(
+      0,
+      ritualCss.indexOf('@media (prefers-reduced-motion: reduce)'),
+    );
+    expect(baseMotion).not.toMatch(/\.wheelmark\s*\{[^}]*animation\s*:/s);
+    expect(baseMotion).toMatch(/\.wheelmark\.is-drawing\s*\{[^}]*animation\s*:\s*draw-in/s);
+    expect(baseMotion).not.toMatch(/\.wheel-dot\s*\{[^}]*animation\s*:/s);
+    expect(baseMotion).toMatch(/\.wheel-dot\.is-drawing\s*\{[^}]*animation\s*:\s*dot-in/s);
     expect(ritualCss).toContain('@media (prefers-reduced-motion: reduce)');
     const reduced = ritualCss.slice(ritualCss.indexOf('@media (prefers-reduced-motion: reduce)'));
     expect(reduced).toContain('.assemble');
     expect(reduced).toContain('transform: none');
     expect(reduced).toContain('.sigilpath');
+    expect(reduced).toContain('.wheelmark.is-drawing');
+    expect(reduced).toContain('.wheel-dot.is-drawing');
   });
 });
 

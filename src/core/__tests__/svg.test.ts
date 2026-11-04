@@ -86,6 +86,43 @@ describe('compositionToSvg base scene', () => {
   });
 });
 
+describe('solid black scene background', () => {
+  it('pins both shared scene constants to literal black', () => {
+    expect(SIGIL_BACKGROUND).toBe('#000000');
+    expect(SIGIL_GLOW).toBe('#000000');
+    // Mark color is untouched by the background change.
+    expect(SIGIL_STROKE).toBe('#D9E6F5');
+  });
+
+  it('renders both radial-gradient stops as literal black with no blue left', () => {
+    const composition = composeSigil(processIntention('LUNARZ'), { seed: 99 });
+    const svg = compositionToExportSvg(composition);
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+
+    const stops = Array.from(doc.querySelectorAll('stop')).map((stop) =>
+      stop.getAttribute('stop-color'),
+    );
+    expect(stops).toEqual(['#000000', '#000000']);
+    expect(svg).not.toContain('#151B28');
+    expect(svg).not.toContain('#2C3A56');
+    expect(svg).not.toMatch(/stop-color="(?!#000000")/);
+    expect(doc.querySelector('rect')?.getAttribute('fill')).toMatch(/^url\(#/);
+    // Mark paint is unchanged by the scene change.
+    expect(doc.querySelector('path')?.getAttribute('stroke')).toBe(SIGIL_STROKE);
+  });
+
+  it('keeps the transparent-background option free of any scene paint', () => {
+    const composition = composeSigil(processIntention('CALM'), { seed: 11 });
+    const svg = compositionToSvg(composition, { includeBackground: false });
+
+    expect(svg).not.toContain('<defs');
+    expect(svg).not.toContain('<radialGradient');
+    expect(svg).not.toContain('<rect');
+    expect(svg).not.toContain('#000000');
+    expect(svg).toContain('<path ');
+  });
+});
+
 describe('exported SVG carries no inspection or derivation metadata', () => {
   it('excludes source letters, indices, seeds, and intention text', () => {
     const intention = processIntention('QUIET NIGHT');
