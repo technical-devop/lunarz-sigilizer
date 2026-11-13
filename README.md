@@ -8,14 +8,25 @@ Runs fully local and offline. No network calls, no accounts, no telemetry.
 
 MIT. See `LICENSE`.
 
-## Platforms
+## Download and install
 
-| OS | Arch | Installer | Runner |
-| --- | --- | --- | --- |
-| Windows | x64 | NSIS `.exe` | `windows-2022` |
-| Ubuntu | x64 | `.deb` | `ubuntu-22.04` |
+Local-first desktop app. It runs fully local and offline, with no accounts and no telemetry.
+
+Get the published installers at https://github.com/technical-devop/lunarz-sigilizer/releases/latest:
+
+| OS | Arch | Installer |
+| --- | --- | --- |
+| Windows | x64 | NSIS `.exe` |
+| Linux | x64 | `.deb` |
 
 Installers are **unsigned**. Expect an OS unknown-publisher warning on first install.
+
+- Windows: download the NSIS `.exe`, then run it after verifying the source before choosing whether to proceed.
+- Linux: download the `.deb`, then in the download folder run `sudo apt install "./Lunarz.Sigilizer_0.1.4_amd64.deb"`. Later releases can have a different filename.
+
+## Exports
+
+The app can save the current mark as SVG (`Save SVG`) and as PNG (`Save PNG`). Both match the previewed lines on the night background. Exported geometry may reveal reduced letters. Wheel and sequence overlays are inspection-only and are not part of the exported files. Exported filenames are generic (`lunarz-sigil.svg`, `lunarz-sigil.png`).
 
 ## Status
 
@@ -24,7 +35,7 @@ Installers are **unsigned**. Expect an OS unknown-publisher warning on first ins
 
 ## Prerequisites
 
-- Node.js 22 and npm
+- Node.js 22.12+ in 22.x, 24.x, or 26+, and npm
 - Rust stable toolchain
 - Linux only: Tauri v2 system prerequisites
 
@@ -59,7 +70,7 @@ Output:
 
 ## CI
 
-`.github/workflows/build.yml` builds both installers on standard hosted runners and uploads them as workflow artifacts. No releases are created.
+`.github/workflows/build.yml` builds both installers on standard hosted runners and uploads them as workflow artifacts.
 
 - `npm ci`
 - `npm test`
